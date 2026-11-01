@@ -43,4 +43,34 @@ BYBIT_PROFILES: tuple[TradingProfile, ...] = (
             "and testnet systems are never selected."
         ),
     ),
+    TradingProfile(
+        id="bybit-paper-trade",
+        connector="bybit",
+        label="Bybit Demo · ccxt Trading",
+        environment="paper",
+        transport="broker_sdk",
+        capabilities=READ_CAPABILITIES + ("orders.place",),
+        readonly=False,
+        config={"profile": "paper"},
+        notes=(
+            "Places and cancels orders on a Bybit demo account (api-demo.bybit.com) "
+            "via ccxt. Bybit demo accounts use a separate key namespace with their "
+            "own user id, so no order from this profile can touch real funds."
+        ),
+    ),
+    TradingProfile(
+        id="bybit-live-trade",
+        connector="bybit",
+        label="Bybit Live · ccxt Trading",
+        environment="live",
+        transport="broker_sdk",
+        capabilities=READ_CAPABILITIES + ("orders.place.requires_mandate",),
+        readonly=False,
+        config={"profile": "live"},
+        notes=(
+            "Places and cancels orders on a Bybit live account (api.bybit.com) via "
+            "ccxt. Live order placement must be gated by the user's mandate; the "
+            "orders.place.requires_mandate capability signals that requirement upstream."
+        ),
+    ),
 )

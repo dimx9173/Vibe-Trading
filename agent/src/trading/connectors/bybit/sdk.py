@@ -15,7 +15,7 @@ import math
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from src.config.paths import get_runtime_root
@@ -27,6 +27,7 @@ from src.trading.connectors.bybit.shaping import (
     ohlcv_to_dict as _ohlcv_to_dict,
     order_to_dict as _order_to_dict,
     position_to_dict as _position_to_dict,
+    to_float as _to_float,
 )
 
 CONFIG_FILENAME = "bybit.json"
@@ -440,6 +441,266 @@ def get_historical_bars(
         "symbol": clean,
         "period": period,
         "bars": [_ohlcv_to_dict(item) for item in _as_iter(bars)],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Order placement (write path; guarded by host separation + profile readonly)
+# ---------------------------------------------------------------------------
+
+#: Project time-in-force intent → ccxt ``timeInForce``. Bybit has no DAY
+#: policy; the unified ``"day"`` intent maps to GTC, the closest equivalent.
+_TIME_IN_FORCE_MAP = {
+    "day": "GTC",
+    "gtc": "GTC",
+    "ioc": "IOC",
+    "fok": "FOK",
+}
+
+
+def _order_link_id_error(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return "orderLinkId must be a non-empty string."
+    if len(value) > 36:
+        return "orderLinkId must be at most 36 characters."
+    return None
+
+
+def _trigger_price_error(value: Any) -> str | None:
+    """Validate a Bybit ``takeProfit``/``stopLoss`` attachment shape."""
+    if not isinstance(value, Mapping):
+        return "takeProfit/stopLoss must be a mapping such as {'triggerPrice': 30000}."
+    if not isinstance(value.get("triggerPrice"), (str, int, float)):
+        return "takeProfit/stopLoss requires a string or numeric 'triggerPrice'."
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, (str, int, float)):
+            return "takeProfit/stopLoss values must be strings or numbers."
+    return None
+
+
+def _bool_error(value: Any) -> str | None:
+    return None if isinstance(value, bool) else "reduceOnly must be a bool."
+
+
+def _position_idx_error(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1, 2):
+        return "positionIdx must be 0, 1 or 2."
+    return None
+
+
+#: Bybit order extras accepted through the trailing ``**broker_params``:
+#: name → shape validator. Every accepted key is forwarded to ccxt; anything
+#: else fails closed instead of being forwarded blind (an unknown key could
+#: silently re-size or re-price the order).
+_BROKER_PARAM_RULES: dict[str, Callable[[Any], str | None]] = {
+    "orderLinkId": _order_link_id_error,
+    "reduceOnly": _bool_error,
+    "positionIdx": _position_idx_error,
+    "takeProfit": _trigger_price_error,
+    "stopLoss": _trigger_price_error,
+}
+
+
+def _broker_params_error(params: Mapping[str, Any]) -> str | None:
+    for name, value in params.items():
+        rule = _BROKER_PARAM_RULES.get(name)
+        if rule is None:
+            return f"unsupported Bybit order parameter '{name}'."
+        problem = rule(value)
+        if problem:
+            return problem
+    return None
+
+
+def place_order(
+    config: BybitConfig | None = None,
+    *,
+    symbol: str,
+    side: str,
+    quantity: float | None = None,
+    notional: float | None = None,
+    order_type: str = "market",
+    limit_price: float | None = None,
+    time_in_force: str = "day",
+    **broker_params: Any,
+) -> dict[str, Any]:
+    """Place an order on Bybit via ccxt's unified ``create_order``.
+
+    The configured profile's host (demo vs live) is the authoritative
+    paper/live discriminator and is asserted before anything is submitted, so a
+    demo key can never reach the live host. The connector executes the intent
+    the caller has already authorized; mandate/limit/kill-switch enforcement
+    lives in a higher layer (service + ``sdk_order_gate``).
+
+    Bybit acknowledges asynchronously: ``status: "ok"`` means the order was
+    ACCEPTED, not filled. ``order_status`` carries Bybit's acknowledgement
+    state; nothing here waits for or claims a fill.
+
+    Either ``quantity`` (base-asset amount) or ``notional`` (quote-asset spend)
+    must be given, never both. ``notional`` is forwarded as ccxt's ``cost``
+    parameter, which ccxt's Bybit adapter turns into a quote-coin sized market
+    order (``marketUnit="quoteCoin"``). Limit orders require ``quantity`` and
+    ``limit_price``.
+
+    ``broker_params`` accepts Bybit's documented order extras — ``orderLinkId``
+    (≤36 characters), ``reduceOnly``, ``positionIdx``, ``takeProfit`` and
+    ``stopLoss`` — validated for shape and forwarded to ccxt. They are
+    validated BEFORE any broker call; an unknown key fails closed rather than
+    being silently dropped.
+
+    Args:
+        config: Connector config; falls back to the saved config when ``None``.
+        symbol: Pair in any accepted form (normalized for ``market_type``).
+        side: ``"buy"`` or ``"sell"``.
+        quantity: Base-asset amount. Mutually exclusive with ``notional``.
+        notional: Quote-asset spend. Mutually exclusive with ``quantity``.
+        order_type: ``"market"`` or ``"limit"``.
+        limit_price: Required when ``order_type`` is ``"limit"``.
+        time_in_force: Limit policy; ``"day"`` maps to Bybit GTC.
+        **broker_params: Validated Bybit order extras.
+
+    Returns:
+        On acceptance: ``{"status": "ok", "order_id", "symbol", "side",
+        "profile", "is_demo", "host", "paper_guard", "order_type",
+        "order_status", "filled", "amount", "price"}``. On any validation or
+        execution failure: ``{"status": "error", "error": str}`` (fail-closed;
+        nothing is submitted on a validation error).
+    """
+    cfg = config or load_config()
+
+    side_clean = str(side or "").strip().lower()
+    if side_clean not in ("buy", "sell"):
+        return {"status": "error", "error": "side must be 'buy' or 'sell'."}
+
+    type_clean = str(order_type or "").strip().lower()
+    if type_clean not in ("market", "limit"):
+        return {"status": "error", "error": "order_type must be 'market' or 'limit'."}
+
+    qty_given = quantity is not None
+    notional_given = notional is not None
+    if qty_given == notional_given:
+        return {"status": "error", "error": "provide exactly one of 'quantity' or 'notional'."}
+
+    qty_value = _to_float(quantity) if qty_given else None
+    notional_value = _to_float(notional) if notional_given else None
+    if qty_given and (qty_value is None or qty_value <= 0):
+        return {"status": "error", "error": "quantity must be a positive number."}
+    if notional_given and (notional_value is None or notional_value <= 0):
+        return {"status": "error", "error": "notional must be a positive number."}
+
+    if type_clean == "limit":
+        if notional_given:
+            return {"status": "error", "error": "limit orders require 'quantity', not 'notional'."}
+        price_value = _to_float(limit_price)
+        if price_value is None or price_value <= 0:
+            return {"status": "error", "error": "limit orders require a positive 'limit_price'."}
+    else:
+        price_value = None
+
+    params_error = _broker_params_error(broker_params)
+    if params_error:
+        return {"status": "error", "error": params_error}
+
+    try:
+        clean_symbol = normalize_symbol(symbol, market_type=cfg.market_type)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    params: dict[str, Any] = dict(broker_params)
+    if type_clean == "limit":
+        tif = _TIME_IN_FORCE_MAP.get(str(time_in_force or "").strip().lower())
+        if tif is None:
+            return {"status": "error", "error": "time_in_force must be one of 'day', 'gtc', 'ioc', 'fok'."}
+        params["timeInForce"] = tif
+        amount = qty_value
+        price: float | None = price_value
+    elif notional_given:
+        params["cost"] = notional_value
+        amount = notional_value
+        price = None
+    else:
+        amount = qty_value
+        price = None
+
+    try:
+        ex = _client(cfg)
+    except BybitConfigError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    try:
+        order = ex.create_order(clean_symbol, type_clean, side_clean, amount, price, params)
+    except Exception as exc:  # noqa: BLE001 - surface any ccxt/auth/network error as fail-closed
+        return {"status": "error", "error": str(exc)}
+
+    return {
+        "status": "ok",
+        "order_id": str(_obj_get(order, "id", "")),
+        "symbol": _obj_get(order, "symbol", clean_symbol),
+        "side": str(_obj_get(order, "side", side_clean)),
+        "profile": cfg.profile,
+        "is_demo": cfg.is_demo,
+        "host": cfg.host,
+        "paper_guard": "host_separated",
+        "order_type": str(_obj_get(order, "type", type_clean)),
+        "order_status": str(_obj_get(order, "status", "")),
+        "filled": _obj_get(order, "filled"),
+        "amount": _obj_get(order, "amount"),
+        "price": _obj_get(order, "price"),
+    }
+
+
+def cancel_order(
+    config: BybitConfig | None = None,
+    order_id: str = "",
+    *,
+    symbol: str | None = None,
+) -> dict[str, Any]:
+    """Cancel an open order by id. Bybit REQUIRES the order's symbol.
+
+    Args:
+        config: Connector config; falls back to the saved config when ``None``.
+        order_id: The exchange order id to cancel.
+        symbol: The order's pair. Bybit cannot cancel without it, so a
+            missing/blank symbol fails closed before any broker call.
+
+    Returns:
+        On success: ``{"status": "ok", "order_id", "symbol", "side", "profile",
+        "is_demo", "host", "paper_guard", "order_status"}``. On any validation
+        or execution failure: ``{"status": "error", "error": str}``.
+    """
+    cfg = config or load_config()
+
+    order_id_clean = str(order_id or "").strip()
+    if not order_id_clean:
+        return {"status": "error", "error": "order_id is required to cancel an order."}
+    if symbol is None or not str(symbol).strip():
+        return {"status": "error", "error": "Bybit cancel requires symbol."}
+
+    try:
+        clean_symbol = normalize_symbol(symbol, market_type=cfg.market_type)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    try:
+        ex = _client(cfg)
+    except BybitConfigError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    try:
+        order = ex.cancel_order(order_id_clean, clean_symbol)
+    except Exception as exc:  # noqa: BLE001 - surface any ccxt/auth/network error as fail-closed
+        return {"status": "error", "error": str(exc)}
+
+    return {
+        "status": "ok",
+        "order_id": str(_obj_get(order, "id", order_id_clean)),
+        "symbol": _obj_get(order, "symbol", clean_symbol),
+        "side": str(_obj_get(order, "side", "")),
+        "profile": cfg.profile,
+        "is_demo": cfg.is_demo,
+        "host": cfg.host,
+        "paper_guard": "host_separated",
+        "order_status": str(_obj_get(order, "status", "")),
     }
 
 

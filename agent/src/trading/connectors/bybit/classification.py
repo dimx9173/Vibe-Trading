@@ -19,4 +19,7 @@ BYBIT_TOOL_CLASS: dict[str, ToolClass] = {
     "fetch_ticker": ToolClass.READ,
     "fetch_ohlcv": ToolClass.READ,
     "load_markets": ToolClass.READ,
+    # WRITE
+    "create_order": ToolClass.WRITE,
+    "cancel_order": ToolClass.WRITE,
 }

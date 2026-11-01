@@ -407,3 +407,212 @@ def test_check_status_counts_balances_on_linear(monkeypatch, demo_client):
     demo_client.fetch_balance = lambda: {"USDT": {"free": 1.0, "used": 0.0, "total": 1.0}}
     report = sdk.check_status(sdk.BybitConfig(api_key="k", api_secret="s"))
     assert report["account"]["balances"] == 1
+
+
+# --- write path with fake exchange ------------------------------------------
+
+
+@pytest.fixture
+def order_client(monkeypatch):
+    client = FakeClient(_demo_urls())
+    monkeypatch.setattr(sdk, "_exchange", lambda _cfg: client)
+    monkeypatch.setattr(sdk, "_public_exchange", lambda _cfg: client)
+    return client
+
+
+def test_place_order_market_quantity_forwards_exact_arguments(order_client):
+    got: dict = {}
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        params = {} if params is None else params
+        got.update(symbol=symbol, side=side, amount=amount, price=price, params=params)
+        return {"id": "ord-1", "symbol": symbol, "side": side, "type": "market",
+                "status": "open", "filled": 0, "amount": amount, "price": price}
+
+    order_client.create_order = create_order
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy", quantity=0.01)
+    assert got == {"symbol": "BTC/USDT:USDT", "side": "buy", "amount": 0.01,
+                   "price": None, "params": {}}
+    assert result["status"] == "ok"
+    assert result["order_id"] == "ord-1"
+    assert result["is_demo"] is True
+    assert result["paper_guard"] == "host_separated"
+    assert result["order_status"] == "open"  # accepted ACK, not a fill claim
+
+
+def test_place_order_notional_forwards_cost_to_ccxt(order_client):
+    got: dict = {}
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        params = {} if params is None else params
+        got.update(params=params, price=price)
+        return {"id": "i", "status": "open", "filled": 0}
+
+    order_client.create_order = create_order
+    sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="sell", notional=50)
+    assert got["params"] == {"cost": 50.0}
+    assert got["price"] is None
+
+
+def test_place_order_limit_sets_gtc_and_forwards_price(order_client):
+    got: dict = {}
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        params = {} if params is None else params
+        got.update(amount=amount, price=price, params=params)
+        return {"id": "i", "status": "open", "filled": 0}
+
+    order_client.create_order = create_order
+    sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy",
+                    quantity=0.01, order_type="limit", limit_price=65000, time_in_force="ioc")
+    assert got == {"amount": 0.01, "price": 65000.0, "params": {"timeInForce": "IOC"}}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        (dict(symbol="BTC-USDT", side="sideways", quantity=1), "side must be"),
+        (dict(symbol="BTC-USDT", side="buy", quantity=1, order_type="stop"), "order_type must be"),
+        (dict(symbol="BTC-USDT", side="buy"), "exactly one of"),
+        (dict(symbol="BTC-USDT", side="buy", quantity=1, notional=1), "exactly one of"),
+        (dict(symbol="BTC-USDT", side="buy", quantity=-1), "quantity must be"),
+        (dict(symbol="BTC-USDT", side="buy", quantity="bogus"), "quantity must be"),
+        (dict(symbol="BTC-USDT", side="buy", notional=0), "notional must be"),
+        (dict(symbol="BTC-USDT", side="buy", quantity=1, order_type="limit"), "positive 'limit_price'"),
+        (dict(symbol="BTC-USDT", side="buy", notional=1, order_type="limit", limit_price=1),
+         "limit orders require 'quantity'"),
+        (dict(symbol="BTC-USDT", side="buy", quantity=1, order_type="limit",
+              limit_price=1, time_in_force="hour"), "time_in_force must be"),
+        (dict(symbol="WEIRD", side="buy", quantity=1), "could not resolve a trading pair"),
+    ],
+)
+def test_place_order_fail_closed_validation_matrix(order_client, kwargs, match):
+    broker_touched: list[str] = []
+    order_client.create_order = lambda *a: broker_touched.append("create_order")
+    result = sdk.place_order(sdk.BybitConfig(), **kwargs)
+    assert result["status"] == "error"
+    assert match in result["error"]
+    assert broker_touched == []
+
+
+def test_place_order_rejects_unknown_broker_param_names(order_client):
+    broker_touched: list[str] = []
+    order_client.create_order = lambda *a: broker_touched.append("create_order")
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy",
+                             quantity=1, tp="99999")
+    assert result["status"] == "error"
+    assert "unsupported Bybit order parameter 'tp'" in result["error"]
+    assert broker_touched == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        (dict(orderLinkId="desk-ref-123"), {"orderLinkId": "desk-ref-123"}),
+        (dict(reduceOnly=True, positionIdx=1),
+         {"reduceOnly": True, "positionIdx": 1}),
+        (dict(takeProfit={"triggerPrice": 70000}, stopLoss={"triggerPrice": 60000}),
+         {"takeProfit": {"triggerPrice": 70000}, "stopLoss": {"triggerPrice": 60000}}),
+    ],
+)
+def test_place_order_forwards_validated_broker_params(order_client, extra, expected):
+    got: dict = {}
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        params = {} if params is None else params
+        got.update(params=params)
+        return {"id": "i", "status": "open", "filled": 0}
+
+    order_client.create_order = create_order
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="sell",
+                             quantity=1, **extra)
+    assert result["status"] == "ok"
+    assert got["params"] == expected
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        (dict(orderLinkId=""), "orderLinkId must be"),
+        (dict(orderLinkId="x" * 37), "at most 36"),
+        (dict(reduceOnly="yes"), "reduceOnly must be"),
+        (dict(positionIdx=3), "positionIdx must be"),
+        (dict(positionIdx=True), "positionIdx must be"),
+        (dict(takeProfit={"price": 1}), "triggerPrice"),
+        (dict(stopLoss="60000"), "must be a mapping"),
+    ],
+)
+def test_place_order_rejects_malformed_broker_params(order_client, extra, match):
+    broker_touched: list[str] = []
+    order_client.create_order = lambda *a: broker_touched.append("create_order")
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy",
+                             quantity=1, **extra)
+    assert result["status"] == "error"
+    assert match in result["error"]
+    assert broker_touched == []
+
+
+def test_place_order_guard_fires_before_submit(order_client, monkeypatch):
+    order_client.urls = _live_urls()  # LIVE URLs vs paper config
+    order_client.create_order = lambda *a: (_ for _ in ()).throw(AssertionError("must not reach broker"))
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy", quantity=1)
+    assert result["status"] == "error"
+    assert "api-demo.bybit.com" in result["error"]
+
+
+def test_place_order_propagates_broker_error_unmasked(order_client):
+    def fail(*a):
+        raise ccxt.NetworkError("synthetic submit failure")
+
+    order_client.create_order = fail
+    result = sdk.place_order(sdk.BybitConfig(), symbol="BTC-USDT", side="buy", quantity=1)
+    assert result["status"] == "error"
+    assert "synthetic submit failure" in result["error"]
+
+
+def test_cancel_order_requires_symbol(order_client):
+    result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol=None)
+    assert result["status"] == "error"
+    assert result["error"] == "Bybit cancel requires symbol."
+    result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol="  ")
+    assert result["status"] == "error"
+    assert result["error"] == "Bybit cancel requires symbol."
+
+
+def test_cancel_order_requires_order_id(order_client):
+    result = sdk.cancel_order(sdk.BybitConfig(), "", symbol="BTC-USDT")
+    assert result["status"] == "error"
+    assert "order_id is required" in result["error"]
+
+
+def test_cancel_order_normalizes_symbol_and_confirms(order_client):
+    got: dict = {}
+
+    def cancel(order_id, symbol):
+        got.update(order_id=order_id, symbol=symbol)
+        return {"id": order_id, "symbol": symbol, "side": "buy", "status": "canceled"}
+
+    order_client.cancel_order = cancel
+    result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol="BTC-USDT")
+    assert got == {"order_id": "9", "symbol": "BTC/USDT:USDT"}
+    assert result["status"] == "ok"
+    assert result["order_status"] == "canceled"
+    assert result["is_demo"] is True
+
+
+def test_cancel_order_guard_fires_before_broker_call(order_client):
+    order_client.urls = _live_urls()
+    order_client.cancel_order = lambda *a: (_ for _ in ()).throw(AssertionError("must not reach broker"))
+    result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol="BTC-USDT")
+    assert result["status"] == "error"
+    assert "api-demo.bybit.com" in result["error"]
+
+
+def test_cancel_order_propagates_broker_error_unmasked(order_client):
+    def fail(*a):
+        raise ccxt.AuthenticationError("synthetic cancel failure")
+
+    order_client.cancel_order = fail
+    result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol="BTC-USDT")
+    assert result["status"] == "error"
+    assert "synthetic cancel failure" in result["error"]

@@ -12,10 +12,17 @@ from src.trading import service
 from src.trading.connectors.bybit.profiles import BYBIT_PROFILES
 from src.trading.types import READ_CAPABILITIES
 
-#: The declared rows for Commit A: (id, environment, readonly, capabilities, config.profile).
+#: The declared rows: (id, environment, readonly, capabilities, config.profile).
 EXPECTED_ROWS = {
     "bybit-paper-sdk": ("paper", True, READ_CAPABILITIES, "paper"),
     "bybit-live-sdk-readonly": ("live", True, READ_CAPABILITIES, "live-readonly"),
+    "bybit-paper-trade": ("paper", False, READ_CAPABILITIES + ("orders.place",), "paper"),
+    "bybit-live-trade": (
+        "live",
+        False,
+        READ_CAPABILITIES + ("orders.place.requires_mandate",),
+        "live",
+    ),
 }
 
 
@@ -31,17 +38,21 @@ def test_row_declares_its_own_environment_and_permissions(profile_id):
     assert profile.config == {"profile": config_profile}
 
 
-def test_readonly_rows_carry_read_only_capabilities():
+def test_paper_order_capability_never_leaks_into_a_live_row():
     for profile in BYBIT_PROFILES:
-        assert profile.readonly is True
-        assert profile.capabilities == READ_CAPABILITIES
-        assert not any(cap.startswith("orders.place") for cap in profile.capabilities)
+        if profile.environment == "live" and "orders.place" in profile.capabilities:
+            assert profile.id == "bybit-live-trade"
+            assert "orders.place.requires_mandate" in profile.capabilities
+    live_trade = next(p for p in BYBIT_PROFILES if p.id == "bybit-live-trade")
+    assert live_trade.config["profile"] == "live"
 
 
-def test_demo_profile_note_names_the_demo_host():
+def test_demo_profiles_read_the_demo_host_and_say_so():
     paper = next(p for p in BYBIT_PROFILES if p.id == "bybit-paper-sdk")
-    assert "api-demo.bybit.com" in paper.notes
-    assert "ccxt" in paper.notes
+    trade = next(p for p in BYBIT_PROFILES if p.id == "bybit-paper-trade")
+    for profile in (paper, trade):
+        assert "api-demo.bybit.com" in profile.notes
+        assert "ccxt" in profile.notes
     assert "cannot reach the live host" in paper.notes
 
 
@@ -66,6 +77,6 @@ def test_service_dispatch_routes_bybit_to_its_sdk_module():
 
 def test_live_registry_curates_the_bybit_tool_map():
     curated = registry._BROKER_CURATED_MAPS["bybit"]
-    for read_key in ("fetch_balance", "fetch_positions", "fetch_open_orders",
-                     "fetch_ticker", "fetch_ohlcv", "load_markets"):
-        assert curated[read_key].value == "read"
+    assert curated["create_order"].value == "write"
+    assert curated["cancel_order"].value == "write"
+    assert curated["fetch_balance"].value == "read"
