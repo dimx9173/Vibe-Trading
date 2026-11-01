@@ -724,6 +724,12 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
     if profile is None:
         raise LiveRunnerUnavailable(f"no {environment} live-runner profile for {broker}")
 
+    # Resolve the trigger market from the CONNECTOR key, before the runner-key
+    # alias below: ``live_runner_market`` maps a connector to "crypto" (bybit) or
+    # "us_equity" (robinhood), and a runner key like "bybit-demo" is not a
+    # connector — it would fall back to equity and skip every 24/7 crypto tick.
+    trigger_market = live_runner_market(broker)
+
     # A ``broker_sdk`` profile (bybit today) has no adapter and no remote tool
     # names: its READ/WRITE seam binds to the service layer instead, so a
     # non-empty ``seam`` selects the sdk runner (crypto trigger, 15-minute
@@ -907,13 +913,11 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
 
     scheduler = Scheduler(_on_fire)
 
-    # A direct-SDK broker trades 24/7: ``crypto`` trigger, the 15-minute
-    # reconcile cadence, and the trading connection pinned into the prompt. The
-    # MCP path keeps its US-equity trigger and legacy prompt untouched.
-    trigger_market = "us_equity"
+    # A direct-SDK broker trades 24/7 under the crypto trigger resolved above,
+    # with the 15-minute reconcile cadence and the trading connection pinned into
+    # the prompt. The MCP path keeps the legacy prompt and US-equity trigger.
     sdk_options: Dict[str, Any] = {}
     if not mcp:
-        trigger_market = live_runner_market(broker)
         sdk_options = {"market_watch_ms": 900_000, "profile_id": profile.id}
     runner = LiveRunner(
         broker,
