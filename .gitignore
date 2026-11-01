@@ -87,6 +87,7 @@ agent/uploads/
 /strategy_discovery.db
 /alpaca.json
 /binance.json
+/bybit.json
 /dhan.json
 /etoro.json
 /futu.json

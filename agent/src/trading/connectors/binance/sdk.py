@@ -833,12 +833,67 @@ def _exchange(cfg: BinanceConfig):
     exchange_class = ccxt.binanceusdm if cfg.market_type == "usdm" else ccxt.binance
     ex = exchange_class(client_config)
     ex.set_sandbox_mode(cfg.is_testnet)
+    if cfg.is_testnet:
+        # ``set_sandbox_mode`` hard-codes ``testnet.binance.vision``. Binance
+        # demo-trading keys live on a different host that the operator names in
+        # ``testnet_host``, and a key is valid only on the host that issued it,
+        # so the configured host is authoritative.
+        _retarget_sandbox_hosts(ex, cfg.testnet_host)
     if cfg.market_type == "usdm":
         try:
             assert_exchange_endpoints(ex)
         except UsdMObservationError as exc:
             raise BinanceConfigError(str(exc)) from None
+    _assert_resolved_host(cfg, ex)
     return ex
+
+
+def _retarget_sandbox_hosts(ex: Any, testnet_host: str) -> None:
+    """Point every sandbox string URL at the operator's configured testnet host.
+
+    Only URLs on the netloc that ``set_sandbox_mode`` left behind are moved:
+    each such URL keeps its own path. Non-string groups and URLs on other
+    netlocs (futures surface, delivery surface) are left untouched.
+    """
+    base = testnet_host.rstrip("/")
+    expected = urlparse(base).hostname or ""
+    if not expected:
+        raise BinanceConfigError(f"testnet_host must be an absolute URL: {testnet_host!r}")
+    api = ex.urls["api"]
+    current = api.get("public")
+    old = urlparse(current).hostname if isinstance(current, str) else ""
+    if not old:
+        raise BinanceConfigError("ccxt sandbox left no public URL to retarget from")
+    for key, value in list(api.items()):
+        if not isinstance(value, str):
+            continue
+        parsed = urlparse(value)
+        if (parsed.hostname or "") != old:
+            continue
+        api[key] = base + (parsed.path or "")
+
+def _assert_resolved_host(cfg: BinanceConfig, ex: Any) -> None:
+    """Fail closed when the client's signed surface is not the declared host.
+
+    The declared config is not evidence: only the URL the client will actually
+    sign against proves which key namespace a read reaches. A client that
+    exposes no URL map is a stub transport, so there is no host to verify.
+    """
+    urls = getattr(ex, "urls", None)
+    api = urls.get("api") if isinstance(urls, Mapping) else None
+    if not isinstance(api, Mapping):
+        return
+    if cfg.market_type != "spot":
+        # The USD-M path asserts its signed endpoints strictly in
+        # ``assert_exchange_endpoints``, which also pins scheme and path.
+        return
+    signed = api.get("private")
+    resolved = urlparse(signed if isinstance(signed, str) else "").hostname or ""
+    expected = urlparse(cfg.host).hostname or ""
+    if resolved != expected:
+        raise BinanceConfigError(
+            f"Configured {cfg.environment} host is '{expected}', but the client signs against '{resolved}'."
+        )
 
 
 def _assert_host(cfg: BinanceConfig) -> None:
