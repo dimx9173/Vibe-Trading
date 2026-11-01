@@ -76,6 +76,23 @@ def test_cancel_only_default_when_mandate_absent(live_runtime: Path) -> None:
     assert all(action == "cancel" for action, _ in broker.calls)
 
 
+def test_cancel_carries_symbol_when_present(live_runtime: Path) -> None:
+    # broker_sdk connectors (Bybit) require the symbol for cancel; the sweep
+    # forwards it from the open-order row. MCP/Robinhood orders stay unchanged.
+    broker = _Broker(
+        open_orders=[{"order_id": "o1", "symbol": "BTC-USDT"}, {"order_id": "o2"}],
+        positions=[],
+    )
+    report = flatten.flatten_and_cancel(
+        "bybit-demo", broker.submit, broker.read_positions, broker.read_open_orders
+    )
+    assert report["cancelled_order_ids"] == ["o1", "o2"]
+    assert broker.calls == [
+        ("cancel", {"action": "cancel", "order_id": "o1", "symbol": "BTC-USDT"}),
+        ("cancel", {"action": "cancel", "order_id": "o2"}),
+    ]
+
+
 def test_cancel_then_flatten_order(live_runtime: Path) -> None:
     broker = _Broker(
         open_orders=[{"order_id": "o1"}],

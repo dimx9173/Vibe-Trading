@@ -274,6 +274,10 @@ def _cancel_resting_orders(
             )
             continue
         request = {"action": "cancel", "order_id": order_id}
+        symbol = order.get("symbol")
+        if isinstance(symbol, str) and symbol.strip():
+            # broker_sdk connectors (Bybit) require the symbol for cancel.
+            request["symbol"] = symbol
         report["side_effects_attempted"] = True
         try:
             response = submit(request)
