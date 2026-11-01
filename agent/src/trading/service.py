@@ -12,6 +12,12 @@ from src.trading.types import TradingProfile
 
 RUNNER_CAPABILITY = "runner.manage.requires_mandate"
 
+#: Any of these on a profile admits it to the managed live runner. The
+#: ``requires_mandate`` spelling is the live-only contract; the plain one is what
+#: a demo/paper profile declares (there is no mandate to require there).
+
+RUNNER_MANAGE_CAPABILITIES = ("runner.manage.requires_mandate", "runner.manage")
+
 #: Direct-SDK connectors (``broker_sdk`` transport) → their connector module.
 #: Each module exposes a uniform read interface (``build_config``, ``check_status``,
 #: ``get_account_snapshot``, ``get_positions``, ``get_open_orders``, ``get_quote``,
@@ -672,6 +678,7 @@ def get_earnings_calendar(
 _CONNECTOR_INSTRUMENT = {
     "okx": ("crypto", "crypto"),
     "binance": ("crypto", "crypto"),
+    "bybit": ("crypto", "crypto"),
     "alpaca": ("equity", "us_equity"),
     "tiger": ("equity", None),
     "longbridge": ("equity", None),
@@ -1463,23 +1470,43 @@ def _audit_live_cancel(profile, order_id, symbol, result, session_id) -> None:
 
 
 def profile_supports_live_runner(profile: TradingProfile) -> bool:
-    """Return whether a profile can run the managed live runner."""
-    return (
-        profile.environment == "live"
-        and profile.transport == "remote_mcp"
-        and RUNNER_CAPABILITY in profile.capabilities
+    """Return whether a profile can run the managed live runner.
+
+    Environment is NOT filtered here: a demo/paper profile is a legitimate
+    runner target (rehearsal) and is selected by the caller through
+    ``live_runner_profile_for_broker(..., environment="paper")``.
+    """
+    return profile.transport in ("remote_mcp", "broker_sdk") and bool(
+        set(profile.capabilities).intersection(RUNNER_MANAGE_CAPABILITIES)
     )
 
 
-def live_runner_profile_for_broker(broker: str) -> TradingProfile | None:
-    """Return the live-runner profile for a broker, if one exists."""
+def live_runner_profile_for_broker(broker: str, *, environment: str = "live") -> TradingProfile | None:
+    """Return the live-runner profile for a broker and environment, if one exists."""
     key = str(broker or "").strip().lower()
     if not key:
         return None
     for profile in list_profiles():
-        if profile.connector == key and profile_supports_live_runner(profile):
+        if (
+            profile.connector == key
+            and profile.environment == environment
+            and profile_supports_live_runner(profile)
+        ):
             return profile
     return None
+
+
+def live_runner_market(broker: str) -> str:
+    """Map a broker to the runner trigger market key (crypto trades 24/7).
+
+    Args:
+        broker: Connector key, e.g. ``"bybit"``.
+
+    Returns:
+        ``"crypto"`` for crypto-only connectors, else ``"us_equity"``.
+    """
+    instrument, _asset = _CONNECTOR_INSTRUMENT.get(str(broker or "").strip().lower(), ("equity", None))
+    return "crypto" if instrument == "crypto" else "us_equity"
 
 
 def broker_supports_live_runner(broker: str) -> bool:

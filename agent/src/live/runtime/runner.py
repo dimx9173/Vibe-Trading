@@ -216,7 +216,7 @@ def _mandate_is_expired(mandate: Mandate, now: datetime) -> bool:
     return now >= expires
 
 
-def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime) -> str:
+def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime, profile_id: str = "") -> str:
     """Build the autonomous-turn prompt with the full mandate pinned inline.
 
     The mandate text is embedded directly in the prompt this runner owns so it
@@ -229,6 +229,10 @@ def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime) -> str:
         broker: Broker key the runner drives.
         mandate: The active, unexpired mandate.
         now: The injected current UTC time (stamped into the prompt for the LLM).
+        profile_id: Trading connection id the agent MUST pass as the
+            ``connection`` argument to EVERY ``trading_*`` tool (including
+            ``trading_place_order``). Empty means the prompt keeps its legacy
+            shape (no connection line), e.g. the Robinhood path.
 
     Returns:
         The full autonomous-turn user prompt.
@@ -238,12 +242,18 @@ def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime) -> str:
     instruments = ", ".join(i.value for i in caps.allowed_instruments) or "(none)"
     asset_classes = ", ".join(a.value for a in universe.asset_classes) or "(none)"
     excluded = ", ".join(universe.exclude_symbols) or "(none)"
+    connection_line = (
+        "Trading connection (pass this as the `connection` argument to EVERY "
+        f"trading_* tool, including trading_place_order): {profile_id}\n"
+        if profile_id else ""
+    )
     return (
         "You are running an AUTONOMOUS live-trading tick under a bounded "
         "mandate. Trade freely INSIDE the limits below; you must NEVER place an "
         "order that would breach any limit — defer instead. The enforcement "
         "gate and kill switch are hard backstops outside your control.\n\n"
         f"Broker: {broker}\n"
+        f"{connection_line}"
         f"Tick time (UTC): {now.isoformat(timespec='seconds')}\n"
         f"Mandate expires (UTC): {mandate.consent.expires_at}\n\n"
         "=== HARD CAPS (vibe-enforced; broker funding is the absolute ceiling) ===\n"
@@ -328,6 +338,7 @@ class LiveRunner:
         triggers: list[Trigger] | None = None,
         market_watch_ms: int = _DEFAULT_MARKET_WATCH_MS,
         session_id: str = "",
+        profile_id: str = "",
     ) -> None:
         """Initialize the runner.
 
@@ -374,6 +385,8 @@ class LiveRunner:
                 An operational knob (default 60s), NOT a safety limit — non-positive
                 values fall back to the default.
             session_id: Session id passed to the agent caller + audit records.
+            profile_id: Trading connection id pinned into the turn prompt
+                (empty keeps the legacy prompt with no connection line).
         """
         self.broker = broker
         self._agent_caller = agent_caller
@@ -395,6 +408,10 @@ class LiveRunner:
         self._triggers = list(triggers or [])
         self._market_watch_ms = market_watch_ms if market_watch_ms > 0 else _DEFAULT_MARKET_WATCH_MS
         self._session_id = session_id or f"live-{broker}"
+        #: Trading connection id pinned into the turn prompt so the agent names
+        #: the profile explicitly on every ``trading_*`` call. Empty keeps the
+        #: legacy prompt (no connection line).
+        self._profile_id = profile_id
         #: Set once the preemptive sweep has fired so a tripped channel never
         #: flattens twice across consecutive ticks (no-retry, SPEC §8.5).
         self._flatten_fired = False
@@ -518,7 +535,7 @@ class LiveRunner:
         Returns:
             The tick result dict.
         """
-        prompt = _pin_mandate_prompt(self.broker, mandate, now)
+        prompt = _pin_mandate_prompt(self.broker, mandate, now, self._profile_id)
         try:
             result = await self._agent_caller(self._session_id, prompt)
         except Exception as exc:

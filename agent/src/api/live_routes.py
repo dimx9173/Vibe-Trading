@@ -94,6 +94,15 @@ class LiveRunnerControlRequest(BaseModel):
 
     broker: str = Field(..., min_length=1, max_length=64)
     session_id: Optional[str] = None
+    environment: str = Field(
+        default="live",
+        pattern=r"^(live|paper)$",
+        description=(
+            "``paper`` runs the broker's paper/demo profile under the "
+            "``<broker>-demo`` runner key (mandate, budget and state "
+            "namespaced there); ``live`` is unchanged."
+        ),
+    )
 
 
 class BrokerAuthState(BaseModel):
@@ -545,6 +554,26 @@ def _active_mandate_state(broker: str) -> Optional[ActiveMandateState]:
     )
 
 
+def _runner_state_key_supported(key: str) -> bool:
+    """Return whether ``key`` names a runner state namespace (live or demo).
+
+    Runner-state endpoints are keyed by the *runner* key, which for a paper run
+    is ``<broker>-demo`` — one level below the connector key the runner-support
+    check takes. So ``bybit-demo`` is supported whenever ``bybit`` is.
+
+    Args:
+        key: Runner key, e.g. ``"robinhood"`` or ``"bybit-demo"``.
+
+    Returns:
+        ``True`` when a runner profile backs that namespace.
+    """
+    from src.trading.service import broker_supports_live_runner
+
+    if key.endswith("-demo") and broker_supports_live_runner(key[: -len("-demo")]):
+        return True
+    return broker_supports_live_runner(key)
+
+
 def _runner_liveness_state(broker: str) -> RunnerLivenessState:
     """Build the runner-liveness snapshot for a broker (SPEC §7.5 contract)."""
     task = _host()._runner_tasks.get(broker)
@@ -567,9 +596,7 @@ def _runner_liveness_state(broker: str) -> RunnerLivenessState:
 
 def _decision_budget_state(broker: str) -> Dict[str, Any] | None:
     """Read model spending controls without probing broker credentials."""
-    from src.trading.service import broker_supports_live_runner
-
-    if not broker_supports_live_runner(broker):
+    if not _runner_state_key_supported(broker):
         return None
     try:
         return DecisionBudget(broker).snapshot(datetime.now(timezone.utc))
@@ -651,7 +678,21 @@ async def _run_live_session_attempt(
         svc.event_bus.remove_listener(on_terminal)
 
 
-def _build_live_runner(broker: str) -> Any:
+def _runner_key(broker: str, environment: str) -> str:
+    """Namespace a demo runner's mandate/audit/decision state apart from live.
+
+    Args:
+        broker: Connector key, e.g. ``"bybit"``.
+        environment: ``"live"`` or ``"paper"``.
+
+    Returns:
+        ``broker`` for live; ``f"{broker}-demo"`` for paper.
+    """
+    return broker if environment == "live" else f"{broker}-demo"
+
+
+
+def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
     """Construct a fully-wired ``LiveRunner`` for a broker (SPEC §7.5 R-INT).
 
     Wires the runner to the real surfaces — the public ``SessionService`` agent
@@ -660,15 +701,40 @@ def _build_live_runner(broker: str) -> Any:
     and injects an audit ``event_callback`` so every autonomous live action is
     broadcast as a ``live.action`` SSE event on the runner's session bus.
 
+    Args:
+        broker: Connector key, e.g. ``"robinhood"``.
+        environment: ``"live"`` (default) or ``"paper"`` — paper selects the
+            broker's demo/paper runner profile under the ``<broker>-demo``
+            runner key.
+
     Raises:
         LiveRunnerUnavailable: When the broker channel is not configured.
     """
+    from src.trading.service import live_runner_market, live_runner_profile_for_broker
+
     h = _host()
+    runner_broker = _runner_key(broker, environment)
 
     # _runner_factory is monkeypatched on host by tests
     factory = getattr(h, "_runner_factory", None)
     if factory is not None:
-        return factory(broker)
+        return factory(runner_broker)
+
+    profile = live_runner_profile_for_broker(broker, environment=environment)
+    if profile is None:
+        raise LiveRunnerUnavailable(f"no {environment} live-runner profile for {broker}")
+
+    # A ``broker_sdk`` profile (bybit today) has no adapter and no remote tool
+    # names: its READ/WRITE seam binds to the service layer instead, so a
+    # non-empty ``seam`` selects the sdk runner (crypto trigger, 15-minute
+    # watch, pinned trading connection) and skips the MCP tool wiring below.
+    mcp = profile.transport != "broker_sdk"
+    if mcp:
+        seam = None
+    else:
+        from src.live.runtime import sdk_runner
+
+        seam = sdk_runner.bind(profile)
 
     from src.live.audit import write_live_action
     from src.live.runtime.reconcile import reconcile
@@ -682,6 +748,12 @@ def _build_live_runner(broker: str) -> Any:
         runner_requires_account,
         runner_tool_name,
     )
+
+    # The runner key IS the broker key for a live channel; a demo/paper runner
+    # never reaches this MCP path (only ``broker_sdk`` supports a paper runner
+    # profile today), so the alias is a no-op for every upstream caller and just
+    # namespaces the runner state for a future paper ``remote_mcp`` profile.
+    broker = runner_broker
 
     requires_account = runner_requires_account(broker)
     if requires_account and not h._mandate_account_ref(broker):
@@ -711,14 +783,14 @@ def _build_live_runner(broker: str) -> Any:
             )
         return remote_tool
 
-    positions_tool = _tool("positions")
-    balance_tool = _tool("account")
-    open_orders_tool = _tool("orders")
-    submit_order_tool = _tool("submit_order")
-    cancel_order_tool = _tool("cancel_order")
+    positions_tool = _tool("positions") if mcp else None
+    balance_tool = _tool("account") if mcp else None
+    open_orders_tool = _tool("orders") if mcp else None
+    submit_order_tool = _tool("submit_order") if mcp else None
+    cancel_order_tool = _tool("cancel_order") if mcp else None
 
     # _live_broker_adapter is monkeypatched on host by tests
-    adapter = h._live_broker_adapter(broker)
+    adapter = h._live_broker_adapter(broker) if mcp else None
 
     def _read(remote_tool: str, operation: str, record_key: str | None = None):
         """Wrap adapter.call_tool into a READ callable with a normalized payload.
@@ -835,18 +907,27 @@ def _build_live_runner(broker: str) -> Any:
 
     scheduler = Scheduler(_on_fire)
 
+    # A direct-SDK broker trades 24/7: ``crypto`` trigger, the 15-minute
+    # reconcile cadence, and the trading connection pinned into the prompt. The
+    # MCP path keeps its US-equity trigger and legacy prompt untouched.
+    trigger_market = "us_equity"
+    sdk_options: Dict[str, Any] = {}
+    if not mcp:
+        trigger_market = live_runner_market(broker)
+        sdk_options = {"market_watch_ms": 900_000, "profile_id": profile.id}
     runner = LiveRunner(
         broker,
         agent_caller=_agent_caller,
         reconcile_fn=reconcile,
-        read_positions=_read(positions_tool, "positions", "positions"),
-        read_balance=_read(balance_tool, "account"),
-        read_open_orders=_read(open_orders_tool, "orders", "orders"),
-        submit_fn=_submit,
+        read_positions=seam.read_positions if seam else _read(positions_tool, "positions", "positions"),
+        read_balance=seam.read_balance if seam else _read(balance_tool, "account"),
+        read_open_orders=seam.read_open_orders if seam else _read(open_orders_tool, "orders", "orders"),
+        submit_fn=seam.submit_fn if seam else _submit,
         write_audit_fn=_audit_with_bus,
         scheduler=scheduler,
-        triggers=[Trigger.market("us_equity")],
+        triggers=[Trigger.market(trigger_market)],
         session_id=session_id,
+        **sdk_options,
     )
     runner_holder["runner"] = runner
     return runner
@@ -1353,10 +1434,8 @@ def register_live_routes(
         return report
 
     def runner_settings_store(broker: str) -> DecisionBudget:
-        from src.trading.service import broker_supports_live_runner
-
         key = broker.strip().lower()
-        if not broker_supports_live_runner(key):
+        if not _runner_state_key_supported(key):
             raise HTTPException(status_code=400, detail=f"live runner is not supported for {key}")
         return DecisionBudget(key)
 
@@ -1393,38 +1472,41 @@ def register_live_routes(
                 detail=f"live runner is not supported for {broker}",
             )
 
+        environment = payload.environment
+        runner_broker = _runner_key(broker, environment)
+
         h = _host()
         tasks = h._runner_tasks
 
-        existing = tasks.get(broker)
+        existing = tasks.get(runner_broker)
         if existing is not None and not existing.done():
             return {"broker": broker, "started": False, "already_running": True}
 
-        mandate = h._active_mandate_state(broker)
+        mandate = h._active_mandate_state(runner_broker)
         if mandate is None:
-            raise HTTPException(status_code=409, detail=f"no committed mandate for {broker}")
+            raise HTTPException(status_code=409, detail=f"no committed mandate for {runner_broker}")
         if mandate.expired:
-            raise HTTPException(status_code=409, detail=f"mandate for {broker} has expired; re-authorize first")
-        if halt_flag_set(broker=broker) or halt_flag_set(broker=None):
+            raise HTTPException(status_code=409, detail=f"mandate for {runner_broker} has expired; re-authorize first")
+        if halt_flag_set(broker=runner_broker) or halt_flag_set(broker=None):
             raise HTTPException(status_code=409, detail="kill switch is tripped; resume before starting the runner")
 
         try:
-            runner = h._build_live_runner(broker)
+            runner = h._build_live_runner(broker, environment=environment)
         except LiveRunnerUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"could not construct runner: {exc}") from exc
 
         task = asyncio.ensure_future(h._drive_runner(runner))
-        tasks[broker] = task
+        tasks[runner_broker] = task
         task.add_done_callback(
-            lambda t, b=broker: tasks.pop(b, None) if tasks.get(b) is t else None
+            lambda t, b=runner_broker: tasks.pop(b, None) if tasks.get(b) is t else None
         )
 
         h._emit_live_event(
             payload.session_id,
             "live.action",
-            {"kind": "runner_started", "broker": broker},
+            {"kind": "runner_started", "broker": broker, "environment": environment},
         )
         return {"broker": broker, "started": True, "already_running": False}
 
@@ -1443,18 +1525,21 @@ def register_live_routes(
                 detail=f"live runner is not supported for {broker}",
             )
 
+        environment = payload.environment
+        runner_broker = _runner_key(broker, environment)
+
         h = _host()
         tasks = h._runner_tasks
-        task = tasks.get(broker)
+        task = tasks.get(runner_broker)
         if task is None or task.done():
             return {"broker": broker, "stopped": False, "was_running": False}
 
         await _cancel_runner_task(task)
-        if tasks.get(broker) is task:
-            tasks.pop(broker, None)
+        if tasks.get(runner_broker) is task:
+            tasks.pop(runner_broker, None)
         h._emit_live_event(
             payload.session_id,
             "live.action",
-            {"kind": "runner_stopped", "broker": broker},
+            {"kind": "runner_stopped", "broker": broker, "environment": environment},
         )
         return {"broker": broker, "stopped": True, "was_running": True}

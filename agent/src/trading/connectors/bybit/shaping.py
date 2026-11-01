@@ -92,11 +92,21 @@ def nonzero_balances(balance: Any) -> list[dict[str, Any]]:
 
 
 def position_to_dict(item: Any) -> dict[str, Any]:
-    """Shape a ccxt unified position row (linear markets)."""
+    """Shape a ccxt unified position row (linear markets).
+
+    Short rows carry a signed quantity: ccxt ``contracts`` is unsigned with
+    ``side`` separate, so a ``"short"`` row is negated. Downstream
+    (``enforcement._position_signed_market_value``, reconcile diffs) keys on
+    ``quantity`` and would otherwise treat a short as a long.
+    """
+    side = str(obj_get(item, "side", ""))
+    qty = obj_get(item, "contracts", obj_get(item, "amount"))
+    if side == "short" and isinstance(qty, (int, float)) and qty:
+        qty = -qty
     return {
         "symbol": obj_get(item, "symbol"),
-        "side": str(obj_get(item, "side", "")),
-        "quantity": obj_get(item, "contracts", obj_get(item, "amount")),
+        "side": side,
+        "quantity": qty,
         "entry_price": obj_get(item, "entryPrice"),
         "mark_price": obj_get(item, "markPrice"),
         "notional": obj_get(item, "notional"),
