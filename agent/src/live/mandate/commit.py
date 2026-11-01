@@ -106,6 +106,8 @@ _CEILING_ALIASES: dict[str, str] = {
     # instrument whitelist
     "instruments": "allowed_instruments",
     "allowed_instruments": "allowed_instruments",
+    # universe asset-class whitelist (user permits buckets, not symbols)
+    "asset_classes": "asset_classes",
 }
 
 
@@ -382,8 +384,9 @@ def _profile_fits_ceilings(profile: Mapping[str, Any], ceilings: Mapping[str, An
                 return False
             if prof_lev > ceiling_lev:
                 return False
-        elif key == "allowed_instruments":
-            # A whitelist may only be narrowed, never widened at commit time.
+        elif key == "allowed_instruments" or key == "asset_classes":
+            # Whitelists may only be narrowed, never widened at commit time.
+            # asset_classes: the user permits buckets, not symbols — same rule.
             if not isinstance(ceiling_value, list) or not isinstance(prof_value, list):
                 return False
             if not all(item in ceiling_value for item in prof_value):

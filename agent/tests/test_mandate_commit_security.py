@@ -179,3 +179,80 @@ def test_commit_mandate_persists_an_explicit_exposure_narrowing(live_runtime: Pa
 def test_cap_mapping_distinguishes_zero_from_an_unspecified_limit(profile, expected) -> None:
     caps = _profile_to_hard_caps(profile)
     assert (caps["account_funding_usd"], caps["max_order_notional_usd"], caps["max_total_exposure_usd"]) == expected
+
+
+# --- asset_classes: proposed buckets persist, ceilings bound them ------------
+# --- asset_classes: proposed buckets persist, ceilings bound them ------------
+
+
+def _ceilings(asset_classes: list[str], instrument_list: list[str] | None = None) -> dict:
+    """Return an account ceiling snapshot for the propose tool."""
+    return {
+        "account_funding_usd": 5000.0,
+        "max_order_notional_usd": 1000.0,
+        "max_total_exposure_usd": 5000.0,
+        "daily_trade_cap": 20,
+        "leverage": 5,
+        "instruments": instrument_list or ["crypto"],
+        "asset_classes": asset_classes,
+        "universe": ["BTC-USDT", "ETH-USDT"],
+    }
+
+
+def test_proposal_carries_asset_classes_into_profiles(live_runtime) -> None:
+    """propose_mandate_profiles forwards the user's asset-class buckets, and
+    commit persists them on the mandate universe (regression: the buckets were
+    silently dropped and every mandate defaulted to us_equity)."""
+    from src.tools.propose_mandate_tool import ProposeMandateProfilesTool
+
+    payload = json.loads(
+        ProposeMandateProfilesTool().execute(broker="bybit", ceilings=_ceilings(["crypto"]))
+    )
+    assert payload["type"] == "mandate.proposal"
+    profile = payload["profiles"][0]
+    assert profile["asset_classes"] == ["crypto"]
+
+    record = commit_mandate(
+        payload["proposal_id"], 1, None, True,
+        broker="bybit", account_ref="acct",
+    )
+    mandate = load_mandate("bybit")
+    assert record["mandate_id"]
+    assert [a.value for a in mandate.universe.asset_classes] == ["crypto"]
+
+
+def test_commit_rejects_profile_wider_than_asset_class_ceiling(live_runtime) -> None:
+    """A resolved profile whose buckets exceed the ceiling snapshot must not
+    commit (same whitelist rule allowed_instruments follows)."""
+    from src.tools.propose_mandate_tool import ProposeMandateProfilesTool
+
+    payload = json.loads(
+        ProposeMandateProfilesTool().execute(broker="bybit", ceilings=_ceilings(["crypto"]))
+    )
+    profile = payload["profiles"][0]
+    # Simulate a commit-time attempt to widen the buckets beyond the snapshot.
+    wider = list(profile["asset_classes"]) + ["us_equity"]
+    with pytest.raises(CommitError):
+        commit_mandate(
+            payload["proposal_id"], 1, {"asset_classes": wider}, True,
+            broker="bybit", account_ref="acct",
+        )
+
+
+def test_commit_accepts_narrowing_asset_classes_at_commit(live_runtime) -> None:
+    """Narrowing the buckets at commit time is allowed and persists."""
+    from src.tools.propose_mandate_tool import ProposeMandateProfilesTool
+
+    payload = json.loads(
+        ProposeMandateProfilesTool().execute(
+            broker="bybit", ceilings=_ceilings(["crypto", "us_equity"])
+        )
+    )
+    record = commit_mandate(
+        payload["proposal_id"], 1, {"asset_classes": ["crypto"]}, True,
+        broker="bybit", account_ref="acct",
+    )
+    mandate = load_mandate("bybit")
+    assert record["mandate_id"]
+    assert [a.value for a in mandate.universe.asset_classes] == ["crypto"]
+    assert mandate.hard_caps.max_leverage == 5.0

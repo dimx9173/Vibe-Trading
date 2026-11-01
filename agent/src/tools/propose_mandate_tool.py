@@ -227,6 +227,7 @@ class ProposeMandateProfilesTool(BaseTool):
                 "ordinal": tpl["ordinal"],
                 "label": tpl["label"],
                 "universe": universe,
+                "asset_classes": list(ceilings.get("asset_classes") or ["us_equity"]),
                 "max_order_usd": max_order,
                 "max_total_exposure_usd": ceil_exposure,
                 "daily_trade_cap": daily,
