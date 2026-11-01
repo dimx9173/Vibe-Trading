@@ -771,7 +771,23 @@ def place_order(
         return _unsupported(profile, "orders.place")
 
     module = _sdk_module(profile.connector)
+    # An order has no dry-run mode and no nullable arguments: anything the
+    # connector cannot honour must abort rather than be silently dropped and
+    # place a different order than the caller asked for.
+    supplied = {key for key, value in overrides.items() if value not in (None, "")}
+    unknown = sorted(supplied - _allowed_override_keys(module) - {"connection_id"})
+    if unknown:
+        return {
+            "status": "error",
+            "profile": profile.id,
+            "connector": profile.connector,
+            "error": (
+                f"unsupported order parameter(s): {', '.join(unknown)}; refusing "
+                "to place an order with ignored arguments."
+            ),
+        }
     config = _sdk_config(profile, module, overrides)
+
     place_kwargs = {
         "symbol": symbol,
         "side": side,

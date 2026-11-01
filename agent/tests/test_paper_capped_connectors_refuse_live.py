@@ -38,6 +38,10 @@ _LIVE_CAPABLE = frozenset(
     {
         "alpaca",
         "binance",
+        # bybit-paper-trade routes to api-demo.bybit.com while bybit-live-trade
+        # routes to api.bybit.com (`paper_guard: host_separated`), so the two
+        # environments can never share a host.
+        "bybit",
         "etoro",
         "futu",
         "okx",

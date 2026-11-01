@@ -97,6 +97,12 @@ _CONNECTOR_COMPATIBILITY: dict[str, PortfolioCompatibility] = {
         "open_positions",
         "Account totals and instrument quote resolution require verification.",
     ),
+    "bybit": PortfolioCompatibility(
+        "experimental",
+        1,
+        "um_perp",
+        "Linear-perp positions and the balance list are adapted; no portfolio contract test yet.",
+    ),
     "toss": PortfolioCompatibility("experimental", 1, "positions", "KRW valuation is not supported yet."),
     "robinhood": PortfolioCompatibility(
         "experimental",

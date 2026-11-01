@@ -658,7 +658,7 @@ LONGBRIDGE_ACCESS_TOKEN=...
 </details>
 
 <details>
-<summary><b>موصّلات الوسطاء</b> <sub>19 وسيطاً — قراءة + حساب ورقي، وتداول حي محدود حيثما يُدعم</sub></summary>
+<summary><b>موصّلات الوسطاء</b> <sub>20 وسيطاً — قراءة + حساب ورقي، وتداول حي محدود حيثما يُدعم</sub></summary>
 
 ملفات تعريف قائمة على الموصّل. يوفّر معظم الموصّلات قراءةً وتنفيذ أوامر على حساب ورقي (paper) — أما IBKR فللقراءة فقط، وRobinhood حيّ فقط (بلا حساب ورقي)، وScalable Capital للقراءة فقط (لا يوجد حساب ورقي إطلاقاً)، وmStock (الهند) للقراءة فقط من الحساب الحي عبر REST Type B (بلا حساب ورقي)، وTrading 212 وToss Securities يرفضان تنفيذ الأوامر كلياً بما فيها الورقية؛ أما تنفيذ الأوامر الحية فمحدود بتفويض يحدّده المستخدم (قائمة رموز مسموح بها، وحدود لحجم الأمر / الانكشاف، وحد يومي للصفقات، ومفتاح إيقاف فوري) ولا يحتفظ الموصّل بأي أموال — الوسيط هو من ينفّذ. تبقى أدوات تنفيذ الأوامر خارج MCP (عبر agent + CLI فقط). ومسارات البحث / الاختبار الرجعي محظورة بنيوياً من أي نقطة نهاية حية.
 
@@ -671,6 +671,7 @@ LONGBRIDGE_ACCESS_TOKEN=...
 | **Tiger** | US / HK / A | قراءة + ورقي + تداول حي محدود |
 | **Alpaca** | US | قراءة + ورقي + تداول حي محدود (+ وضع عزل الاعتماد TAP) |
 | **OKX** · **Binance** | crypto | قراءة + ورقي + تداول حي محدود |
+| **Bybit** | crypto | قراءة + تجريبي (api-demo.bybit.com، فصل مضيف) + تداول حي محدود |
 | **Futu** | HK / US / A | قراءة + ورقي + تداول حي محدود |
 | **eToro** | global | قراءة + ورقي + تداول حي محدود (Public API؛ مفاتيح demo لا تصل بنيويًا إلا إلى مسارات `/demo`، مع دعم تدفقات التداول بالنسخ) |
 | **MetaTrader 5** | forex / CFD | قراءة + ورقي + تداول حي محدود (بأسلوب Exness؛ حارس هوية demo ⇔ paper) |
@@ -1765,7 +1766,7 @@ Vibe-Trading/
 │   │   ├── memory/                 # Cross-session persistent memory
 │   │   │   └── persistent.py       #   file-based memory (~/.vibe-trading/memory/)
 │   │   │
-│   │   ├── tools/                  # 118 auto-discovered agent tools
+│   │   ├── tools/                  # 119 auto-discovered agent tools
 │   │   │   ├── backtest_tool.py    #   run backtests
 │   │   │   ├── remember_tool.py    #   cross-session memory (save/recall/forget)
 │   │   │   ├── skill_writer_tool.py #  skill CRUD (save/patch/delete/file)

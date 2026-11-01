@@ -19,6 +19,7 @@ def test_every_builtin_portfolio_connector_has_an_explicit_compatibility_tier():
     expected = {
         "alpaca": "contract_tested",
         "binance": "native",
+        "bybit": "experimental",
         "dhan": "experimental",
         "etoro": "experimental",
         "futu": "experimental",

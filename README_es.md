@@ -662,7 +662,7 @@ clon (`pip install -e .`).
 </details>
 
 <details>
-<summary><b>Conectores de Broker</b> <sub>19 brokers — lectura + paper, live acotado donde esté soportado</sub></summary>
+<summary><b>Conectores de Broker</b> <sub>20 brokers — lectura + paper, live acotado donde esté soportado</sub></summary>
 
 Perfiles centrados en el conector. La mayoría hace lectura + colocación de órdenes en cuenta paper — IBKR es de solo lectura, Robinhood es solo live (sin cuenta paper), Scalable Capital es de solo lectura (no existe cuenta paper), mStock (India) es live de solo lectura por su REST Type B (sin cuenta paper), y Trading 212 y Toss Securities rechazan la colocación de órdenes por completo, incluido el paper; la colocación de órdenes live está acotada por un mandato definido por el usuario (lista blanca de símbolos, límites de tamaño de orden / exposición, límite diario de operaciones, interruptor de apagado instantáneo) y nunca retiene fondos — el broker ejecuta. Las herramientas de colocación de órdenes se mantienen fuera de MCP (solo agente + CLI). Las rutas de investigación / backtest están estructuralmente vetadas de cualquier endpoint live.
 
@@ -675,6 +675,7 @@ Perfiles centrados en el conector. La mayoría hace lectura + colocación de ór
 | **Tiger** | EE. UU. / HK / A | lectura + paper + live acotado |
 | **Alpaca** | EE. UU. | lectura + paper + live acotado (+ modo TAP de aislamiento de credenciales) |
 | **OKX** · **Binance** | cripto | lectura + paper + live acotado |
+| **Bybit** | cripto | lectura + demo (api-demo.bybit.com, hosts separados) + live acotado |
 | **Futu** | HK / EE. UU. / A | lectura + paper + live acotado |
 | **eToro** | global | lectura + paper + live acotado (API pública; las claves demo solo alcanzan rutas `/demo`, además de flujos de copy-trading) |
 | **MetaTrader 5** | forex / CFD | lectura + paper + live acotado (estilo Exness; guardia de identidad demo ⇔ paper) |
@@ -1853,7 +1854,7 @@ Vibe-Trading/
 │   │   ├── memory/                 # Memoria persistente entre sesiones
 │   │   │   └── persistent.py       #   memoria basada en archivos (~/.vibe-trading/memory/)
 │   │   │
-│   │   ├── tools/                  # 118 herramientas de agente autodescubiertas
+│   │   ├── tools/                  # 119 herramientas de agente autodescubiertas
 │   │   │   ├── backtest_tool.py    #   ejecuta backtests
 │   │   │   ├── remember_tool.py    #   memoria entre sesiones (save/recall/forget)
 │   │   │   ├── skill_writer_tool.py #  CRUD de skills (save/patch/delete/file)
