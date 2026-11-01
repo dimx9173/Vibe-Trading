@@ -761,6 +761,30 @@ class TradingPlaceOrderTool(BaseTool):
             "order_type": {"type": "string", "enum": ["market", "limit"], "default": "market"},
             "limit_price": {"type": "number", "description": "Required for limit orders."},
             "time_in_force": {"type": "string", "enum": ["day", "gtc"], "default": "day"},
+            "take_profit_price": {
+                "type": "number",
+                "description": (
+                    "Optional broker-side take-profit trigger price attached to this "
+                    "order. Only connectors that accept attached order parameters "
+                    "(Bybit) support it; others refuse the order."
+                ),
+            },
+            "stop_loss_price": {
+                "type": "number",
+                "description": (
+                    "Optional broker-side stop-loss trigger price attached to this "
+                    "order. Only connectors that accept attached order parameters "
+                    "(Bybit) support it; others refuse the order."
+                ),
+            },
+            "reduce_only": {
+                "type": "boolean",
+                "description": "Optional reduce-only flag for a closing order (Bybit).",
+            },
+            "order_link_id": {
+                "type": "string",
+                "description": "Optional client order id, at most 36 characters (Bybit).",
+            },
         },
         "required": ["symbol", "side"],
     }
@@ -782,6 +806,11 @@ class TradingPlaceOrderTool(BaseTool):
             quantity = _num_or_none(kwargs.get("quantity"), "quantity") or None
             notional = _num_or_none(kwargs.get("notional"), "notional") or None
             limit_price = _num_or_none(kwargs.get("limit_price"), "limit_price")
+            take_profit_price = _num_or_none(kwargs.get("take_profit_price"), "take_profit_price")
+            stop_loss_price = _num_or_none(kwargs.get("stop_loss_price"), "stop_loss_price")
+            reduce_only = kwargs.get("reduce_only")
+            if reduce_only is not None and not isinstance(reduce_only, bool):
+                raise InvalidTradingArgument("reduce_only must be a boolean.")
             overrides = _overrides(kwargs)
         except InvalidTradingArgument as exc:
             return _json_result({"status": "error", "error": str(exc)})
@@ -797,6 +826,10 @@ class TradingPlaceOrderTool(BaseTool):
                     order_type=str(kwargs.get("order_type") or "market"),
                     limit_price=limit_price,
                     time_in_force=str(kwargs.get("time_in_force") or "day"),
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    reduce_only=reduce_only,
+                    order_link_id=_connection(kwargs.get("order_link_id")),
                     **overrides,
                 )
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import sys
 from typing import Any
@@ -714,6 +715,17 @@ def _order_classification(connector: str, symbol: str):
     return instrument, None
 
 
+def _accepts_extra_kwargs(place_order_fn: Any) -> bool:
+    try:
+        parameters = inspect.signature(place_order_fn).parameters
+    except (TypeError, ValueError):
+        return False
+    for parameter in parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
 def place_order(
     symbol: str,
     profile_id: str | None = None,
@@ -724,6 +736,10 @@ def place_order(
     order_type: str = "market",
     limit_price: float | None = None,
     time_in_force: str = "day",
+    take_profit_price: float | None = None,
+    stop_loss_price: float | None = None,
+    reduce_only: bool | None = None,
+    order_link_id: str | None = None,
     session_id: str = "",
     **overrides: Any,
 ) -> dict[str, Any]:
@@ -734,6 +750,12 @@ def place_order(
     fail-closed pre-trade checks + audit) before any order reaches the broker.
     Only ``broker_sdk`` connectors are supported here; Robinhood keeps its MCP
     gate and IBKR stays read-only.
+
+    ``take_profit_price`` / ``stop_loss_price`` / ``reduce_only`` /
+    ``order_link_id`` attach broker-side extras to the same order. They are
+    forwarded only to a connector whose ``place_order`` accepts extras (Bybit
+    defines them); any other connector refuses the whole order rather than place
+    it without the protection the caller requested.
     """
     profile = profile_by_id(profile_id)
     if profile.transport != "broker_sdk":
@@ -752,6 +774,29 @@ def place_order(
         "limit_price": limit_price,
         "time_in_force": time_in_force,
     }
+
+    attached: dict[str, Any] = {}
+    if take_profit_price is not None:
+        attached["takeProfit"] = {"triggerPrice": take_profit_price}
+    if stop_loss_price is not None:
+        attached["stopLoss"] = {"triggerPrice": stop_loss_price}
+    if reduce_only is not None:
+        attached["reduceOnly"] = reduce_only
+    if order_link_id is not None:
+        attached["orderLinkId"] = order_link_id
+    if attached:
+        if not _accepts_extra_kwargs(module.place_order):
+            return {
+                "status": "error",
+                "profile": profile.id,
+                "connector": profile.connector,
+                "error": (
+                    f"{profile.connector} does not accept attached order parameters "
+                    f"({', '.join(sorted(attached))}); refusing to place an order "
+                    "without the protection the caller requested."
+                ),
+            }
+        place_kwargs.update(attached)
 
     if profile.environment == "paper":
         return _with_profile(profile, module.place_order(config, **place_kwargs))

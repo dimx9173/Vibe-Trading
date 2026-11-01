@@ -616,3 +616,88 @@ def test_cancel_order_propagates_broker_error_unmasked(order_client):
     result = sdk.cancel_order(sdk.BybitConfig(), "9", symbol="BTC-USDT")
     assert result["status"] == "error"
     assert "synthetic cancel failure" in result["error"]
+
+
+def _paper_service_profile(monkeypatch, name: str = "bybit-paper-trade"):
+    from src.trading import service
+
+    for profile in service.list_profiles():
+        if profile.id == name:
+            return profile
+    raise AssertionError(f"profile missing in registry: {name}")
+
+
+def test_service_place_attaches_takeprofit_stoploss_to_bybit(monkeypatch, order_client):
+    from src.trading import service
+
+    got: dict = {}
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        got.update(params={} if params is None else params)
+        return {"id": "ord-tp", "symbol": symbol, "side": side, "type": order_type,
+                "status": "open", "filled": 0, "amount": amount, "price": price}
+
+    order_client.create_order = create_order
+    result = service.place_order(
+        "BTC-USDT", "bybit-paper-trade", side="buy", quantity=0.01,
+        take_profit_price=85000.0, stop_loss_price=72000.0,
+    )
+    assert result["status"] == "ok"
+    assert got["params"] == {
+        "takeProfit": {"triggerPrice": 85000.0},
+        "stopLoss": {"triggerPrice": 72000.0},
+    }
+    assert result["order_id"] == "ord-tp"
+
+
+def test_service_place_refuses_attached_params_on_binance(monkeypatch):
+    from src.trading import service
+
+    result = service.place_order(
+        "BTCUSDT", "binance-paper-trade", side="buy", quantity=0.001,
+        stop_loss_price=70000.0,
+    )
+    assert result["status"] == "error"
+    assert "stopLoss" in result["error"]
+    assert "binance" in result["error"]
+
+
+def test_tool_place_rejects_non_boolean_reduce_only(monkeypatch):
+    import json
+
+    from src.tools.trading_connector_tool import TradingPlaceOrderTool
+
+    payload = json.loads(
+        TradingPlaceOrderTool().execute(
+            symbol="BTC-USDT", connection="bybit-paper-trade", side="buy",
+            quantity=0.01, reduce_only="yes",
+        )
+    )
+    assert payload["status"] == "error"
+    assert "reduce_only" in payload["error"]
+
+
+def test_tool_place_forwards_protection_to_service(monkeypatch):
+    import json
+
+    from src.tools import trading_connector_tool
+
+    calls: dict = {}
+
+    def fake_place(symbol, profile_id, **kwargs):
+        calls.update(kwargs)
+        return {"status": "ok", "order_id": "t-1"}
+
+    monkeypatch.setattr(trading_connector_tool, "place_order", fake_place)
+    payload = json.loads(
+        trading_connector_tool.TradingPlaceOrderTool().execute(
+            symbol="BTC-USDT", connection="bybit-paper-trade", side="sell",
+            quantity=0.01, take_profit_price=80000.0, stop_loss_price=76000.0,
+            reduce_only=True, order_link_id="close-1",
+        )
+    )
+    assert payload["status"] == "ok"
+    assert calls["take_profit_price"] == 80000.0
+    assert calls["stop_loss_price"] == 76000.0
+    assert calls["reduce_only"] is True
+    assert calls["order_link_id"] == "close-1"
