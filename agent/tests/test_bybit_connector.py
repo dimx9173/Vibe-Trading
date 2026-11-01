@@ -701,3 +701,204 @@ def test_tool_place_forwards_protection_to_service(monkeypatch):
     assert calls["stop_loss_price"] == 76000.0
     assert calls["reduce_only"] is True
     assert calls["order_link_id"] == "close-1"
+
+
+# --- leverage ----------------------------------------------------------------
+
+
+def test_set_leverage_int_forwards_to_ccxt(order_client):
+    got: dict = {}
+
+    def set_leverage(leverage, symbol, params=None):
+        got.update(leverage=leverage, symbol=symbol, params=params)
+        return {"retMsg": "OK"}
+
+    order_client.set_leverage = set_leverage
+    result = sdk.set_leverage(sdk.BybitConfig(), "BTC-USDT", leverage=5)
+    assert result["status"] == "ok"
+    assert got == {"leverage": 5, "symbol": "BTC/USDT:USDT", "params": None}
+    assert result["leverage"] == 5
+
+
+def test_set_leverage_rejects_spot():
+    result = sdk.set_leverage(
+        sdk.BybitConfig(market_type="spot"), "BTC-USDT", leverage=5,
+    )
+    assert result["status"] == "error"
+    assert "linear" in result["error"]
+
+
+@pytest.mark.parametrize("junk", [0, 0.5, -3, None, "ten", float("inf"), float("nan")])
+def test_set_leverage_rejects_bad_leverage(junk):
+    result = sdk.set_leverage(sdk.BybitConfig(), "BTC-USDT", leverage=junk)
+    assert result["status"] == "error"
+    assert "leverage" in result["error"]
+
+
+def test_set_leverage_guard_fires_before_broker_call(order_client):
+    order_client.urls = _live_urls()
+    order_client.set_leverage = lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not reach broker")
+    )
+    result = sdk.set_leverage(sdk.BybitConfig(), "BTC-USDT", leverage=5)
+    assert result["status"] == "error"
+    assert "api-demo.bybit.com" in result["error"]
+
+
+def test_service_set_leverage_paper_routes_to_module(monkeypatch, order_client):
+    from src.trading import service
+
+    got: dict = {}
+
+    def set_leverage(leverage, symbol, params=None):
+        got.update(leverage=leverage, symbol=symbol)
+        return {"retMsg": "OK"}
+
+    order_client.set_leverage = set_leverage
+    result = service.set_leverage("BTC-USDT", "bybit-paper-trade", leverage=5)
+    assert result["status"] == "ok"
+    assert got == {"leverage": 5, "symbol": "BTC/USDT:USDT"}
+
+
+def test_service_set_leverage_refused_on_binance():
+    from src.trading import service
+
+    result = service.set_leverage("BTCUSDT", "binance-paper-trade", leverage=5)
+    assert result["status"] == "error"
+    assert "leverage" in result["error"]
+    assert "binance" in result["error"]
+
+
+def _bybit_live_mandate(max_leverage: float):
+    from datetime import datetime, timezone
+
+    from src.live.mandate.model import (
+        MANDATE_SCHEMA_VERSION,
+        ConsentMeta,
+        HardCaps,
+        Mandate,
+        UniverseConstraint,
+    )
+
+    return Mandate(
+        schema_version=MANDATE_SCHEMA_VERSION,
+        hard_caps=HardCaps(
+            account_funding_usd=10_000.0,
+            max_order_notional_usd=10_000.0,
+            max_total_exposure_usd=10_000.0,
+            max_leverage=max_leverage,
+            allowed_instruments=(),
+            max_trades_per_day=100,
+        ),
+        universe=UniverseConstraint(
+            asset_classes=(), min_market_cap_usd=None,
+            min_avg_daily_volume_usd=None, exclude_symbols=(),
+        ),
+        consent=ConsentMeta(
+            created_at=datetime.now(timezone.utc).isoformat(),
+            consent_token_sha256="deadbeef",
+            broker="bybit",
+            account_ref="demo-acct",
+            expires_at="2999-01-01T00:00:00+00:00",
+        ),
+    )
+
+
+def test_service_set_leverage_live_requires_mandate(monkeypatch, order_client):
+    from src.trading import service
+
+    def refuse(*a, **k):
+        raise AssertionError("must not reach broker")
+
+    order_client.urls = _live_urls()
+    order_client.set_leverage = refuse
+    monkeypatch.setattr("src.live.mandate.store.load_mandate", lambda broker: None)
+    result = service.set_leverage("BTC-USDT", "bybit-live-trade", leverage=5)
+    assert result["status"] == "error"
+    assert "mandate" in result["error"]
+
+
+def test_service_set_leverage_live_halted_denies(monkeypatch, order_client):
+    from src.trading import service
+
+    order_client.urls = _live_urls()
+    order_client.set_leverage = lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not reach broker")
+    )
+    monkeypatch.setattr("src.live.mandate.store.load_mandate", lambda broker: _bybit_live_mandate(10))
+    monkeypatch.setattr("src.live.halt.halt_flag_set", lambda broker: True)
+    result = service.set_leverage("BTC-USDT", "bybit-live-trade", leverage=5)
+    assert result["status"] == "error"
+    assert "halted" in result["error"]
+
+
+def test_service_set_leverage_live_cap_enforced(monkeypatch, order_client):
+    from src.trading import service
+
+    order_client.urls = _live_urls()
+    order_client.set_leverage = lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not reach broker")
+    )
+    monkeypatch.setattr("src.live.mandate.store.load_mandate", lambda broker: _bybit_live_mandate(10))
+    monkeypatch.setattr("src.live.halt.halt_flag_set", lambda broker: False)
+    result = service.set_leverage("BTC-USDT", "bybit-live-trade", leverage=20)
+    assert result["status"] == "error"
+    assert "max_leverage" in result["error"]
+
+
+def test_service_set_leverage_live_within_cap_executes_and_audits(monkeypatch, order_client):
+    from src.trading import service
+
+    got: dict = {}
+
+    def set_leverage(leverage, symbol, params=None):
+        got.update(leverage=leverage, symbol=symbol)
+        return {"retMsg": "OK"}
+
+    order_client.urls = _live_urls()
+    order_client.set_leverage = set_leverage
+    written: list = []
+    monkeypatch.setattr("src.live.mandate.store.load_mandate", lambda broker: _bybit_live_mandate(10))
+    monkeypatch.setattr("src.live.halt.halt_flag_set", lambda broker: False)
+    import src.live.audit as audit
+
+    def fake_write(event, *a, **k):
+        written.append(event)
+        return {"audited": True}
+
+    monkeypatch.setattr(audit, "write_live_action", fake_write)
+    result = service.set_leverage("BTC-USDT", "bybit-live-trade", leverage=10, session_id="sess-9")
+    assert result["status"] == "ok"
+    assert got == {"leverage": 10, "symbol": "BTC/USDT:USDT"}
+    assert len(written) == 1
+    assert written[0].kind == "leverage_set"
+    assert written[0].outcome == "accepted"
+    assert written[0].session_id == "sess-9"
+
+
+def test_tool_set_leverage_forwards_and_validates(monkeypatch):
+    import json
+
+    from src.tools import trading_connector_tool
+
+    calls: dict = {}
+
+    def fake_set_leverage(symbol, profile_id, **kwargs):
+        calls.update(kwargs)
+        return {"status": "ok", "leverage": kwargs["leverage"]}
+
+    monkeypatch.setattr(trading_connector_tool, "set_leverage", fake_set_leverage)
+    payload = json.loads(
+        trading_connector_tool.TradingSetLeverageTool().execute(
+            symbol="BTC-USDT", connection="bybit-paper-trade", leverage=5,
+        )
+    )
+    assert payload["status"] == "ok"
+    assert calls["leverage"] == 5.0
+
+    bad = json.loads(
+        trading_connector_tool.TradingSetLeverageTool().execute(
+            symbol="BTC-USDT", connection="bybit-paper-trade", leverage="five",
+        )
+    )
+    assert bad["status"] == "error"

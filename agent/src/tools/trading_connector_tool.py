@@ -42,6 +42,7 @@ from src.trading.service import (
     get_quote,
     get_rehab,
     place_order,
+    set_leverage,
     search_instruments,
 )
 
@@ -871,6 +872,54 @@ class TradingCancelOrderTool(BaseTool):
                     str(kwargs["order_id"]),
                     _connection(kwargs.get("connection")),
                     symbol=_connection(kwargs.get("symbol")),
+                    **overrides,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json_result({"status": "error", "error": str(exc)})
+
+
+class TradingSetLeverageTool(BaseTool):
+    """Set per-symbol leverage on a trading connector profile.
+
+    Perp-only (Bybit linear). Paper profiles set directly; live profiles are
+    gated by the mandate's max_leverage cap, the kill switch, and mandate
+    expiry — all fail-closed.
+    """
+
+    name = "trading_set_leverage"
+    description = (
+        "Set per-symbol leverage on a perpetual futures connection (Bybit "
+        "linear only). Paper profiles set directly; live profiles require a "
+        "valid mandate and refuse multiples above its max_leverage cap."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            **TRADING_COMMON_PARAMETERS,
+            "symbol": {"type": "string", "description": "Perp pair, e.g. BTC-USDT, BTC/USDT:USDT."},
+            "leverage": {"type": "number", "description": "Leverage multiple, >= 1 (e.g. 5 means 5x)."},
+        },
+        "required": ["symbol", "leverage"],
+    }
+    repeatable = False
+    is_readonly = False
+
+    def execute(self, **kwargs: Any) -> str:
+        try:
+            leverage = _num_or_none(kwargs.get("leverage"), "leverage")
+            overrides = _overrides(kwargs)
+        except InvalidTradingArgument as exc:
+            return _json_result({"status": "error", "error": str(exc)})
+        if leverage is None:
+            return _json_result({"status": "error", "error": "leverage is required."})
+
+        try:
+            return _json_result(
+                set_leverage(
+                    str(kwargs["symbol"]),
+                    _connection(kwargs.get("connection")),
+                    leverage=leverage,
                     **overrides,
                 )
             )

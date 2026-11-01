@@ -704,6 +704,67 @@ def cancel_order(
     }
 
 
+def set_leverage(
+    config: BybitConfig | None = None,
+    symbol: str = "",
+    *,
+    leverage: float = 1.0,
+) -> dict[str, Any]:
+    """Set per-symbol leverage on Bybit via ccxt's ``set_leverage``.
+
+    Only the ``linear`` (perp) surface supports this; spot symbols refuse
+    before any broker call. ``leverage`` must be a finite number ≥ 1. The
+    broker enforces its own ceiling (Bybit's max per pair); a broker rejection
+    surfaces unmasked so the caller sees the real limit.
+
+    Args:
+        config: Connector config; falls back to the saved config when ``None``.
+        symbol: Pair in any accepted form (normalized for ``market_type``).
+        leverage: Desired leverage multiple, ≥ 1.
+
+    Returns:
+        On success: ``{"status": "ok", "symbol", "leverage", "profile",
+        "is_demo", "host", "paper_guard"}``. On any validation or execution
+        failure: ``{"status": "error", "error": str}``.
+    """
+    cfg = config or load_config()
+
+    if cfg.market_type != "linear":
+        return {"status": "error", "error": "Bybit leverage requires a linear (perp) market_type."}
+
+    try:
+        lev = float(leverage)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "error", "error": "leverage must be a finite number >= 1."}
+    if not math.isfinite(lev) or lev < 1:
+        return {"status": "error", "error": "leverage must be a finite number >= 1."}
+
+    try:
+        clean_symbol = normalize_symbol(symbol, market_type=cfg.market_type)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    try:
+        ex = _client(cfg)
+    except BybitConfigError as exc:
+        return {"status": "error", "error": str(exc)}
+
+    try:
+        ex.set_leverage(int(lev), clean_symbol)
+    except Exception as exc:  # noqa: BLE001 - surface any ccxt/auth/network error as fail-closed
+        return {"status": "error", "error": str(exc)}
+
+    return {
+        "status": "ok",
+        "symbol": clean_symbol,
+        "leverage": int(lev),
+        "profile": cfg.profile,
+        "is_demo": cfg.is_demo,
+        "host": cfg.host,
+        "paper_guard": "host_separated",
+    }
+
+
 # ---------------------------------------------------------------------------
 # SDK plumbing
 # ---------------------------------------------------------------------------

@@ -854,6 +854,136 @@ def cancel_order(
     return _with_profile(profile, result)
 
 
+def set_leverage(
+    symbol: str,
+    profile_id: str | None = None,
+    *,
+    leverage: float,
+    session_id: str = "",
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Set per-symbol leverage via a connector profile.
+
+    Paper profiles call the connector directly. Live profiles are gated: a
+    valid unexpired mandate must be on file, the kill switch must not be
+    tripped, and the requested multiple must not exceed the mandate's
+    ``max_leverage`` cap (fail-closed — no mandate, no set). Every live set is
+    audit-logged regardless of outcome.
+    """
+    profile = profile_by_id(profile_id)
+    if profile.transport != "broker_sdk":
+        return _unsupported(profile, "leverage.set")
+    if profile.readonly:
+        return _unsupported(profile, "leverage.set")
+    module = _sdk_module(profile.connector)
+    setter = getattr(module, "set_leverage", None)
+    if setter is None:
+        return _unsupported(profile, "leverage.set")
+
+    if profile.environment == "paper":
+        config = _sdk_config(profile, module, overrides)
+        return _with_profile(profile, setter(config, symbol, leverage=leverage))
+
+    # Live: mandate cap + kill switch + expiry, then audit.
+    from src.live.halt import halt_flag_set
+    from src.live.mandate.model import MANDATE_SCHEMA_VERSION
+    from src.live.mandate.store import load_mandate
+
+    mandate = load_mandate(profile.connector)
+    if mandate is None or mandate.schema_version != MANDATE_SCHEMA_VERSION:
+        return _live_leverage_deny(profile, leverage, mandate, "no valid mandate on file")
+    if halt_flag_set(profile.connector):
+        return _live_leverage_deny(profile, leverage, mandate, "live trading halted")
+
+    from datetime import datetime, timezone
+
+    try:
+        expires = datetime.fromisoformat(mandate.consent.expires_at)
+    except (TypeError, ValueError):
+        return _live_leverage_deny(profile, leverage, mandate, "mandate expiry unreadable")
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= expires:
+        return _live_leverage_deny(profile, leverage, mandate, "mandate expired")
+
+    cap = float(mandate.hard_caps.max_leverage)
+    if float(leverage) > cap:
+        return _live_leverage_deny(
+            profile, leverage, mandate,
+            f"requested leverage {float(leverage)} exceeds mandate max_leverage {cap}",
+        )
+
+    config = _sdk_config(profile, module, overrides)
+    result = setter(config, symbol, leverage=leverage)
+    _audit_live_leverage(profile, symbol, leverage, result, session_id)
+    return _with_profile(profile, result)
+
+
+def _live_leverage_deny(
+    profile: TradingProfile, leverage: float, mandate: Any, reason: str
+) -> dict[str, Any]:
+    try:
+        from src.live.audit import LiveActionEvent, write_live_action
+
+        event = LiveActionEvent(
+            kind="leverage_set",
+            session_id="",
+            outcome="denied",
+            server=profile.connector,
+            remote_tool="set_leverage",
+            intent_normalized=f"set leverage {leverage}",
+            mandate_snapshot_ref=None,
+            consent_record_ref=None,
+            broker_request={"leverage": leverage},
+            broker_response={"reason": reason},
+            gate_decision={"allowed": False, "decision": "deny", "reason": reason},
+            error=reason,
+        )
+        try:
+            write_live_action(event, event_callback=None, trace_writer=None)
+        except TypeError:
+            write_live_action(event)
+    except Exception:  # noqa: BLE001 - auditing must never block a refusal
+        pass
+    return {
+        "status": "error",
+        "profile": profile.id,
+        "connector": profile.connector,
+        "environment": profile.environment,
+        "error": reason,
+    }
+
+
+def _audit_live_leverage(
+    profile: TradingProfile, symbol: str, leverage: float, result: Any, session_id: str
+) -> None:
+    """Write a live-action audit record for a live leverage change (best-effort)."""
+    try:
+        from src.live.audit import LiveActionEvent, write_live_action
+
+        ok = isinstance(result, dict) and str(result.get("status", "")).lower() == "ok"
+        event = LiveActionEvent(
+            kind="leverage_set",
+            session_id=session_id,
+            outcome="accepted" if ok else "error",
+            server=profile.connector,
+            remote_tool="set_leverage",
+            intent_normalized=f"set leverage {leverage} {symbol or ''}".strip(),
+            mandate_snapshot_ref=None,
+            consent_record_ref=None,
+            broker_request={"symbol": symbol, "leverage": leverage},
+            broker_response=result if isinstance(result, dict) else {"raw": result},
+            gate_decision={"allowed": True, "decision": "allow"},
+            error=None if ok else (result.get("error") if isinstance(result, dict) else "leverage set failed"),
+        )
+        try:
+            write_live_action(event, event_callback=None, trace_writer=None)
+        except TypeError:
+            write_live_action(event)
+    except Exception:  # noqa: BLE001 - auditing must never block a change
+        pass
+
+
 def _unsupported_etoro(profile: TradingProfile, capability: str) -> dict[str, Any]:
     return _unsupported(profile, capability)
 

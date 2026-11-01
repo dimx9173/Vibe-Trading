@@ -16,11 +16,11 @@ from src.trading.types import READ_CAPABILITIES
 EXPECTED_ROWS = {
     "bybit-paper-sdk": ("paper", True, READ_CAPABILITIES, "paper"),
     "bybit-live-sdk-readonly": ("live", True, READ_CAPABILITIES, "live-readonly"),
-    "bybit-paper-trade": ("paper", False, READ_CAPABILITIES + ("orders.place",), "paper"),
+    "bybit-paper-trade": ("paper", False, READ_CAPABILITIES + ("orders.place", "leverage.set"), "paper"),
     "bybit-live-trade": (
         "live",
         False,
-        READ_CAPABILITIES + ("orders.place.requires_mandate",),
+        READ_CAPABILITIES + ("orders.place.requires_mandate", "leverage.set.requires_mandate"),
         "live",
     ),
 }
