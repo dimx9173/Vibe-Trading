@@ -22,6 +22,7 @@ _SDK_CONNECTOR_MODULES = {
     "alpaca": "src.trading.connectors.alpaca.sdk",
     "okx": "src.trading.connectors.okx.sdk",
     "binance": "src.trading.connectors.binance.sdk",
+    "bybit": "src.trading.connectors.bybit.sdk",
     "futu": "src.trading.connectors.futu.sdk",
     "dhan": "src.trading.connectors.dhan.sdk",
     "shoonya": "src.trading.connectors.shoonya.sdk",

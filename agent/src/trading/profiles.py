@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.config.paths import get_runtime_root
 from src.trading.connectors.alpaca.profiles import ALPACA_PROFILES
+from src.trading.connectors.bybit.profiles import BYBIT_PROFILES
 from src.trading.connectors.binance.profiles import BINANCE_PROFILES
 from src.trading.connectors.dhan.profiles import DHAN_PROFILES
 from src.trading.connectors.futu.profiles import FUTU_PROFILES
@@ -38,6 +39,7 @@ BUILTIN_PROFILES: tuple[TradingProfile, ...] = (
     *ALPACA_PROFILES,
     *OKX_PROFILES,
     *BINANCE_PROFILES,
+    *BYBIT_PROFILES,
     *FUTU_PROFILES,
     *DHAN_PROFILES,
     *SHOONYA_PROFILES,
