@@ -216,6 +216,9 @@ def test_pin_mandate_prompt_includes_full_mandate() -> None:
     assert "750.0" in prompt  # max order notional
     assert "5000.0" in prompt  # max total exposure
     assert "Max trades per UTC day: 5" in prompt
+    # Sizing discipline: the agent must not pass a USD amount as `quantity`.
+    assert "`quantity` is in UNITS" in prompt
+    assert "`notional` is in USD" in prompt
     assert "equity, etf" in prompt
     assert "us_equity" in prompt
     assert "GME, AMC" in prompt  # exclude list
