@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import re
 import sys as _sys
 import time
 from datetime import datetime, timezone
@@ -678,6 +680,103 @@ async def _run_live_session_attempt(
         svc.event_bus.remove_listener(on_terminal)
 
 
+# --- Live-decision retry: free-tier model chains rate-limit and their failure
+# windows are transient. A bounded fresh-session retry keeps a rate-limit blip
+# from parking the runner behind a HALT; deterministic failures keep the
+# fail-closed path. Token spend from failed attempts stays recorded because
+# the caller owns one decision row across attempts.
+_LIVE_DECISION_MAX_ATTEMPTS_ENV = "VIBE_TRADING_LIVE_DECISION_MAX_ATTEMPTS"
+_LIVE_DECISION_RETRY_MAX_DELAY_ENV = "VIBE_TRADING_LIVE_DECISION_RETRY_MAX_DELAY_S"
+_LIVE_DECISION_RETRY_BASE_S = 2.0
+_DECISION_RETRYABLE_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_DECISION_ERROR_CODE_RE = re.compile(r"\bcode: (\d{3})\b")
+_DECISION_RETRYABLE_TEXT_MARKERS = (
+    "rate limit", "too many requests", "quota", "429",
+    "timed out", "timeout", "connection reset", "connection error",
+    "temporarily unavailable", "overloaded",
+)
+
+
+def _live_decision_max_attempts() -> int:
+    """Bounded fresh-session attempts per live decision; 1 disables retrying."""
+    raw = os.getenv(_LIVE_DECISION_MAX_ATTEMPTS_ENV, "2")
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = 2
+    return max(1, min(parsed, 5))
+
+
+def _live_decision_retry_max_delay_s() -> float:
+    """Upper bound for one inter-attempt backoff (free-tier Retry-After)."""
+    raw = os.getenv(_LIVE_DECISION_RETRY_MAX_DELAY_ENV, "60")
+    try:
+        parsed = float(raw)
+    except ValueError:
+        parsed = 60.0
+    return max(0.0, min(parsed, 300.0))
+
+
+def _decision_error_retryable(error: Any) -> bool:
+    """Mirror ``ProviderStreamError.retryable`` on attempt-failure text.
+
+    Attempt failures surface as ``str(exc)`` (session service wraps the
+    terminal event), so classification is conservative: an explicit
+    ``code: NNN`` decides first, transport words retry, and a bare
+    ``provider_stream_error`` (status unknown) retries once more. Budget
+    trips, ``no_progress`` stops, and 4xx client errors stay fail-closed.
+    """
+    text = error if isinstance(error, str) else str(error)
+    codes = {int(match) for match in _DECISION_ERROR_CODE_RE.findall(text)}
+    if codes:
+        return any(code in _DECISION_RETRYABLE_CODES for code in codes)
+    lowered = text.lower()
+    if any(marker in lowered for marker in _DECISION_RETRYABLE_TEXT_MARKERS):
+        return True
+    return "provider_stream_error" in text
+
+
+def _decision_retry_delay_s(error: Any, streak: int) -> float:
+    """Exponential backoff honoring an embedded Retry-After hint."""
+    text = error if isinstance(error, str) else str(error)
+    retry_after: Optional[float] = None
+    match = re.search(r"retry[-_ ]after\D{0,8}(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+    if match:
+        retry_after = float(match.group(1))
+    delay = retry_after if retry_after is not None else _LIVE_DECISION_RETRY_BASE_S * (2 ** (streak - 1))
+    return min(delay, _live_decision_retry_max_delay_s())
+
+
+async def _retry_live_decision_attempt(
+    attempt_fn: Callable[[], Awaitable[Dict[str, Any]]], *, broker: str,
+) -> Dict[str, Any]:
+    """Run one live-model decision with bounded retries for transient failures."""
+    from src.live.halt import halt_flag_set
+
+    max_attempts = _live_decision_max_attempts()
+    streak = 0
+    while True:
+        try:
+            return await attempt_fn()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            streak += 1
+            if streak >= max_attempts or not _decision_error_retryable(exc):
+                raise
+            if halt_flag_set(broker=broker):
+                # Budget accounting tripped the kill switch mid-attempt:
+                # fail-closed wins over a provider hiccup.
+                raise
+            delay = _decision_retry_delay_s(exc, streak)
+            logger.warning(
+                "live decision attempt %d/%d failed retryably (broker=%s); retrying in %.1fs: %s",
+                streak, max_attempts, broker, delay, exc,
+            )
+            await asyncio.sleep(delay)
+
+
+
 def _runner_key(broker: str, environment: str) -> str:
     """Namespace a demo runner's mandate/audit/decision state apart from live.
 
@@ -869,9 +968,8 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
             if decision is None:
                 return {"status": "waiting"}
             # Broker state and the pinned mandate are reconstructed each tick.
-            # Previous model conversations are neither authority nor input.
-            tick_session = svc.create_session(title=f"live-decision:{broker}")
-
+            # Previous model conversations are neither authority nor input;
+            # each retry opens a fresh tick session for the same reason.
             def record_usage(data: Dict[str, Any]) -> None:
                 try:
                     budget.record(decision, data, settings, datetime.now(timezone.utc))
@@ -879,9 +977,13 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
                     trip_halt(by="file", reason="live model spending limit or usage accounting failure", broker=broker)
                     raise
 
-            return await _run_live_session_attempt(
-                svc, tick_session.session_id, prompt, usage_callback=record_usage,
-            )
+            async def attempt_once() -> Dict[str, Any]:
+                tick_session = svc.create_session(title=f"live-decision:{broker}")
+                return await _run_live_session_attempt(
+                    svc, tick_session.session_id, prompt, usage_callback=record_usage,
+                )
+
+            return await _retry_live_decision_attempt(attempt_once, broker=broker)
         except asyncio.CancelledError:
             failed = True
             raise
