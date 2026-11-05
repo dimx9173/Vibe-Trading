@@ -124,8 +124,6 @@ class DecisionBudget:
     def _check(settings: DecisionSettings, totals: dict[str, Any], *, starting: bool) -> None:
         if totals["unaccounted_turns"]:
             raise DecisionBudgetError("provider usage is unavailable for a prior decision today")
-        if starting and totals["turns"] >= settings.max_daily_turns:
-            raise DecisionBudgetError("daily model decision limit reached")
         if totals["tokens"] >= settings.max_daily_tokens:
             raise DecisionBudgetError("daily model token budget reached")
         if settings.max_daily_cost_usd is not None:
@@ -145,7 +143,12 @@ class DecisionBudget:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM decisions WHERE finished=0 LIMIT 1").fetchone():
                 raise DecisionBudgetError("an unfinished model decision requires inspection before restart")
-            self._check(settings, self._totals(db, now), starting=True)
+            totals = self._totals(db, now)
+            self._check(settings, totals, starting=True)
+            if totals["turns"] >= settings.max_daily_turns:
+                # Spent the day's decision quota: wait for the next UTC day like
+                # any other between-decision gap — a quota state, not a failure.
+                return None
             last = db.execute("SELECT max(started) FROM decisions").fetchone()[0]
             if settings.daily_at:
                 local = now.astimezone(ZoneInfo(settings.timezone))

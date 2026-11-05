@@ -223,6 +223,13 @@ def test_pin_mandate_prompt_includes_full_mandate() -> None:
     assert "us_equity" in prompt
     assert "GME, AMC" in prompt  # exclude list
     assert BROKER in prompt
+    # Bracket discipline: every directional entry must carry TP/SL protection.
+    assert "`take_profit_price`" in prompt
+    assert "`stop_loss_price`" in prompt
+    assert "`reduce_only=true`" in prompt
+    # Signal gate: read quote + indicators before acting; HOLD is the default.
+    assert "`trading_quote`" in prompt
+    assert "`technical_indicators`" in prompt
 
 
 # --------------------------------------------------------------------------- #

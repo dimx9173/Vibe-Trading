@@ -160,6 +160,27 @@ def test_uncategorized_tokens_use_the_higher_configured_price(tmp_path):
     budget.record(decision, {**_usage(), "total_tokens": 120}, settings, NOW)
     assert budget.snapshot(NOW)["usage"]["estimated_cost_usd"] == pytest.approx(0.0014)
 
+def test_spent_turn_quota_waits_instead_of_failing(tmp_path):
+    """A spent daily turn quota is a wait state (like any cadence gap), not an error.
+
+    Regression: the 2026-11-04 21:24Z incident tripped a permanent HALT on the
+    7th begin of a max_daily_turns=6 day (`daily model decision limit reached`
+    raised through _agent_caller's fail-closed catch), parking the runner until
+    manual resume. begin() at quota must return None so the tick yields
+    {"status": "waiting"} and retries on the next UTC day.
+    """
+    budget = _store(tmp_path)
+    settings = DecisionSettings(max_daily_turns=2, interval_seconds=60)
+    for i in range(2):
+        decision = budget.begin(settings, NOW + timedelta(minutes=i))
+        budget.record(decision, _usage(), settings, NOW + timedelta(minutes=i))
+        budget.finish(decision, settings, NOW + timedelta(minutes=i))
+    # Quota spent: same-day begins wait, even past the cadence interval.
+    assert budget.begin(settings, NOW + timedelta(hours=1)) is None
+    assert _store(tmp_path).begin(settings, NOW + timedelta(hours=1)) is None
+    # Next UTC day: fresh quota fires again.
+    assert _store(tmp_path).begin(settings, NOW + timedelta(days=1)) is not None
+
 
 @pytest.mark.parametrize("reported", [True, False])
 def test_real_agent_stops_before_tools_when_usage_monitor_cancels(tmp_path, reported):
