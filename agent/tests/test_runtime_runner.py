@@ -227,6 +227,8 @@ def test_pin_mandate_prompt_includes_full_mandate() -> None:
     assert "`take_profit_price`" in prompt
     assert "`stop_loss_price`" in prompt
     assert "`reduce_only=true`" in prompt
+    # Maker-first fee discipline: limit preferred, market only with immediacy.
+    assert "as maker" in prompt
     # Signal gate: read quote + indicators before acting; HOLD is the default.
     assert "`trading_quote`" in prompt
     assert "`technical_indicators`" in prompt
