@@ -231,6 +231,9 @@ def test_pin_mandate_prompt_includes_full_mandate() -> None:
     assert "as maker" in prompt
     # Signal gate: read quote + indicators before acting; HOLD is the default.
     assert "`trading_quote`" in prompt
+    # Required sequence checklist: numbered steps + concrete example.
+    assert "=== REQUIRED TOOL CALL SEQUENCE" in prompt
+    assert "Skipping steps 2-3" in prompt
     assert "`technical_indicators`" in prompt
 
 

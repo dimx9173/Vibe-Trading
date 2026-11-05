@@ -278,7 +278,16 @@ def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime, profile_id
         "`technical_indicators` for the candidate symbol(s) FIRST; every entry "
         "decision must cite the readings it was based on. Read "
         "`trading_connections` once for the available connections. HOLD is the "
-        "default — only enter when the evidence names a concrete edge.\n\n"
+        "default — only enter when the evidence names a concrete edge.\n"
+        "=== REQUIRED TOOL CALL SEQUENCE (do these IN ORDER before deciding) ===\n"
+        "1. `trading_connections` — confirm the trading connection id.\n"
+        "2. `trading_quote` for EACH candidate symbol (price, bid/ask, 24h change).\n"
+        "3. `technical_indicators` for EACH candidate symbol (RSI, MACD, Bollinger).\n"
+        "4. Decide: HOLD (name the missing condition) or ORDER (cite the readings).\n"
+        'Example: trading_connections -> trading_quote(symbol="BTC-USDT") + '
+        'technical_indicators(symbol="BTC-USDT") -> HOLD "RSI 55 neutral, no edge" '
+        'or ORDER with TP/SL justified by the quote. Skipping steps 2-3 and '
+        "deciding from memory is a prompt violation.\n\n"
         "=== DISCOVERY UNIVERSE (pick symbols within these structural filters) ===\n"
         f"- Asset classes: {asset_classes}\n"
         f"- Min market cap (USD): {universe.min_market_cap_usd}\n"
