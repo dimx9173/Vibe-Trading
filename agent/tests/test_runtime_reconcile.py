@@ -349,3 +349,105 @@ def test_corrupt_state_fails_closed_and_preserves_evidence(
     assert read_calls == []
     assert path.read_text(encoding="utf-8") == contents
     assert list(path.parent.glob("runtime_state.json.corrupt-*")) == []
+
+
+# ---------------------------------------------------------------------------
+# audit-evidence downgrade (own agent fill adopted, ghost position still halts)
+# ---------------------------------------------------------------------------
+
+
+def _write_audit_record(
+    live_runtime: Path,
+    *,
+    broker: str,
+    kind: str = "order_placed",
+    outcome: str = "accepted",
+    intent: str = "autonomous tick completed",
+    ts: str = "2026-05-30T00:00:00.000+00:00",
+) -> None:
+    """Append one record to the live-action ledger the downgrade reads."""
+    import src.live.audit as audit_mod
+
+    ledger = audit_mod.audit_ledger_path()
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "audit_id": "la_test",
+                "ts": ts,
+                "kind": kind,
+                "outcome": outcome,
+                "server": broker,
+                "intent_normalized": intent,
+                "broker_request": None,
+                "broker_response": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_own_fill_with_audit_evidence_downgrades_to_matched(
+    live_runtime: Path,
+) -> None:
+    """Our agent's fill (audit shows accepted ETH order after baseline) is safe."""
+    _seed_state("bybit-demo", positions=[])
+    _write_audit_record(
+        live_runtime,
+        broker="bybit-demo",
+        intent="trading_place_order ETH-USDT buy 0.11 limit 2253 filled",
+        ts="2026-05-31T00:00:00.000+00:00",
+    )
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert _kinds(report) == {DeltaKind.MATCHED}
+    assert report.is_safe is True
+    assert report.state_persisted is True
+
+
+def test_ghost_position_without_audit_evidence_still_halts(
+    live_runtime: Path,
+) -> None:
+    """No ledger evidence: the same broker position stays unknown_fill."""
+    _seed_state("bybit-demo", positions=[])
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert DeltaKind.UNKNOWN_FILL in _kinds(report)
+    assert report.requires_halt is True
+    assert report.state_persisted is False
+
+
+def test_stale_audit_evidence_does_not_whitewash(
+    live_runtime: Path,
+) -> None:
+    """A fill older than the baseline cannot excuse a fresh delta."""
+    _seed_state("bybit-demo", positions=[])
+    _write_audit_record(
+        live_runtime,
+        broker="bybit-demo",
+        intent="trading_place_order ETH-USDT buy 0.11",
+        ts="2026-05-28T00:00:00.000+00:00",  # before the 05-29 baseline
+    )
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert DeltaKind.UNKNOWN_FILL in _kinds(report)
+    assert report.requires_halt is True
+
+
+def test_unreadable_audit_ledger_fails_closed(live_runtime: Path) -> None:
+    """A corrupt ledger line is skipped, not trusted: still halts."""
+    _seed_state("bybit-demo", positions=[])
+    import src.live.audit as audit_mod
+
+    ledger = audit_mod.audit_ledger_path()
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("{not json\n", encoding="utf-8")
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert DeltaKind.UNKNOWN_FILL in _kinds(report)
+    assert report.requires_halt is True

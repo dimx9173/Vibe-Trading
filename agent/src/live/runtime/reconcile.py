@@ -271,6 +271,79 @@ def _position_qty(position: Mapping[str, Any]) -> float:
                 return 0.0
     return 0.0
 
+def _normalize_symbol_for_audit(symbol: str) -> str:
+    """Normalize a position symbol for audit-trail matching (case/format blind).
+
+    Broker positions use ``ETH/USDT:USDT`` (base/quote:settle) while audit
+    intents embed the universe form ``ETH-USDT`` (base-quote); both reduce to
+    the bare base+quote pair, so a trailing ``:USDT`` settle suffix — the
+    same asset repeated as quote and settle — is collapsed before matching.
+    """
+    alnum = "".join(ch for ch in symbol.upper() if ch.isalnum())
+    # Perpetual form repeats the quote leg as settle (USDTUSDT); collapse it.
+    for quote in ("USDT", "USDC", "USD"):
+        if alnum.endswith(quote + quote):
+            return alnum[: -len(quote)]
+    return alnum
+
+
+def _audit_has_legit_fill(broker: str, symbol: str, since_ts: str | None) -> bool:
+    """Check the live-action ledger for a matching accepted order placement.
+
+    An ``unknown_fill`` whose symbol appears in an accepted ``order_placed``
+    record for the same broker *after* the last clean reconcile baseline is
+    our own agent's fill — not an external ghost position. The ledger is
+    append-only and hash-chained, so a matching record is durable evidence.
+    Any read failure (missing file, corrupt line, unparseable timestamp)
+    returns ``False`` so the caller keeps fail-closed.
+
+    Args:
+        broker: Runner key the ledger records under ``server``.
+        symbol: Broker-form position symbol to match.
+        since_ts: ISO-8601 baseline (``reconciled_at``); only later records
+            count, so historical fills cannot whitewash a fresh delta.
+
+    Returns:
+        ``True`` when a matching accepted placement is found.
+    """
+    from src.live.audit import audit_ledger_path
+
+    try:
+        ledger = audit_ledger_path()
+        if not ledger.is_file():
+            return False
+        want = _normalize_symbol_for_audit(symbol)
+        # Append-only ledger, newest last: scan the tail for a same-day fill.
+        lines = ledger.read_text(encoding="utf-8").splitlines()[-500:]
+    except (OSError, ValueError):
+        return False
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("server") != broker or rec.get("kind") != "order_placed":
+            continue
+        if rec.get("outcome") not in ("accepted", "filled"):
+            continue
+        if since_ts and str(rec.get("ts", "")) <= since_ts:
+            continue
+        haystack = _normalize_symbol_for_audit(
+            json.dumps(
+                {
+                    "intent": rec.get("intent_normalized"),
+                    "request": rec.get("broker_request"),
+                    "response": rec.get("broker_response"),
+                    "tool": rec.get("remote_tool"),
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        if want and want in haystack:
+            return True
+    return False
+
 
 def reconcile(
     broker: str,
@@ -327,8 +400,13 @@ def reconcile(
     # anything. Diffing only runs once a prior durable state exists.
     deltas: list[ReconcileDelta] = []
     if had_prior_state:
+        since_ts = str(prior.get("reconciled_at") or "") if prior else ""
         deltas.extend(_diff_orders(recorded_orders, broker_orders))
-        deltas.extend(_diff_positions(recorded_positions, broker_positions))
+        deltas.extend(
+            _diff_positions(
+                recorded_positions, broker_positions, broker=broker, since_ts=since_ts,
+            )
+        )
 
     recorded_client_order_ids = tuple(
         coid for coid in (_client_order_id(o) for o in recorded_orders) if coid
@@ -445,16 +523,25 @@ def _diff_orders(
 def _diff_positions(
     recorded_positions: Sequence[Mapping[str, Any]],
     broker_positions: Sequence[Mapping[str, Any]],
+    *,
+    broker: str = "",
+    since_ts: str | None = None,
 ) -> list[ReconcileDelta]:
     """Classify the position side of the diff.
 
     A broker position (or quantity) we have no record of is an ``unknown_fill``:
-    real money moved without a matching audit record. A recorded position that
-    still matches broker truth is ``matched``.
+    real money moved without a matching audit record — UNLESS the live-action
+    ledger shows our own agent placed an accepted order for that symbol after
+    the last clean baseline, in which case the delta is ``matched`` (evidence
+    downgrade; the position is adopted as the new baseline on persist).
+    Without ``broker``/``since_ts`` context the downgrade cannot run and every
+    unrecorded position stays ``unknown_fill`` (fail-closed).
 
     Args:
         recorded_positions: Positions we persisted before shutdown.
         broker_positions: Positions the broker currently reports.
+        broker: Runner key to match the audit ledger's ``server`` field.
+        since_ts: Baseline timestamp; only later audit records count.
 
     Returns:
         One :class:`ReconcileDelta` per symbol where broker truth diverges from
@@ -484,6 +571,26 @@ def _diff_positions(
                     client_order_id=None,
                     detail="recorded position matches broker truth",
                     recorded={"symbol": symbol, "qty": recorded_qty},
+                    broker=dict(position),
+                )
+            )
+        elif broker and since_ts and _audit_has_legit_fill(broker, symbol, since_ts):
+            deltas.append(
+                ReconcileDelta(
+                    kind=DeltaKind.MATCHED,
+                    subject="position",
+                    identity=symbol,
+                    client_order_id=None,
+                    detail=(
+                        "broker position adopted via live-action audit "
+                        f"evidence (recorded={recorded_qty}, "
+                        f"broker={broker_qty})"
+                    ),
+                    recorded=(
+                        None
+                        if recorded_qty is None
+                        else {"symbol": symbol, "qty": recorded_qty}
+                    ),
                     broker=dict(position),
                 )
             )

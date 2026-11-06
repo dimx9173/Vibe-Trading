@@ -585,6 +585,7 @@ class LiveRunner:
             kind="order_placed",
             outcome="accepted",
             intent="autonomous tick completed",
+            agent_result=result,
         )
         return TickResult(
             outcome=TICK_INVOKED,
@@ -882,6 +883,7 @@ class LiveRunner:
         outcome: str,
         intent: str,
         error: str | None = None,
+        agent_result: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Write one live-action audit record for a tick outcome.
 
@@ -893,6 +895,10 @@ class LiveRunner:
             outcome: The :class:`~src.live.audit.LiveActionOutcome`.
             intent: Normalized human-readable intent string.
             error: Optional error description.
+            agent_result: Raw agent-tick result; when it carries tool-call
+                evidence (e.g. an order placement) it is embedded in the
+                record so later reconciles can match broker truth against
+                our own fills instead of halting on them.
 
         Returns:
             The written record's ``audit_id``, or ``None`` if the write failed.
@@ -904,6 +910,7 @@ class LiveRunner:
             server=self.broker,
             intent_normalized=intent,
             error=error,
+            broker_response=dict(agent_result) if agent_result is not None else None,
         )
         try:
             record = self._write_audit(event)
