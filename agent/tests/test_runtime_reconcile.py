@@ -362,8 +362,11 @@ def _write_audit_record(
     broker: str,
     kind: str = "order_placed",
     outcome: str = "accepted",
-    intent: str = "autonomous tick completed",
+    intent: str = "paper place buy ETH-USDT",
     ts: str = "2026-05-30T00:00:00.000+00:00",
+    remote_tool: str = "place_order",
+    request: dict[str, Any] | None = None,
+    response: dict[str, Any] | None = None,
 ) -> None:
     """Append one record to the live-action ledger the downgrade reads."""
     import src.live.audit as audit_mod
@@ -379,13 +382,62 @@ def _write_audit_record(
                 "outcome": outcome,
                 "server": broker,
                 "intent_normalized": intent,
-                "broker_request": None,
-                "broker_response": None,
+                "remote_tool": remote_tool,
+                "broker_request": (
+                    {"symbol": "ETH-USDT", "side": "buy", "quantity": 0.11}
+                    if request is None
+                    else request
+                ),
+                "broker_response": response,
             }
         )
         + "\n",
         encoding="utf-8",
     )
+
+
+def test_symbol_mention_without_a_placement_does_not_whitewash(
+    live_runtime: Path,
+) -> None:
+    """A tick/decision record naming the symbol is not placement evidence.
+
+    This is the ghost-whitelist hole: an external actor moves ETH, while our
+    ledger holds a tick marker (or a decision summary) that merely mentions
+    ETH-USDT. Only an order-shaped record may adopt the position.
+    """
+    _seed_state("bybit-demo", positions=[])
+    _write_audit_record(
+        live_runtime,
+        broker="bybit-demo",
+        intent="autonomous tick completed — holding ETH-USDT",
+        remote_tool="",
+        request={},
+        ts="2026-05-31T00:00:00.000+00:00",
+    )
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert DeltaKind.UNKNOWN_FILL in _kinds(report)
+    assert report.requires_halt is True
+    assert report.state_persisted is False
+
+
+def test_placement_for_a_different_symbol_does_not_whitewash(
+    live_runtime: Path,
+) -> None:
+    """Order-shaped evidence for another pair cannot adopt an unexplained one."""
+    _seed_state("bybit-demo", positions=[])
+    _write_audit_record(
+        live_runtime,
+        broker="bybit-demo",
+        request={"symbol": "BTC-USDT", "side": "buy", "quantity": 0.01},
+        ts="2026-05-31T00:00:00.000+00:00",
+    )
+    rp, rb, ro = _readers(positions=[{"symbol": "ETH/USDT:USDT", "quantity": 0.11}])
+    report = reconcile("bybit-demo", rp, rb, ro)
+
+    assert DeltaKind.UNKNOWN_FILL in _kinds(report)
+    assert report.requires_halt is True
 
 
 def test_own_fill_with_audit_evidence_downgrades_to_matched(

@@ -287,15 +287,40 @@ def _normalize_symbol_for_audit(symbol: str) -> str:
     return alnum
 
 
-def _audit_has_legit_fill(broker: str, symbol: str, since_ts: str | None) -> bool:
-    """Check the live-action ledger for a matching accepted order placement.
+_PLACEMENT_TOOLS = ("place_order", "trading_place_order")
 
-    An ``unknown_fill`` whose symbol appears in an accepted ``order_placed``
-    record for the same broker *after* the last clean reconcile baseline is
-    our own agent's fill — not an external ghost position. The ledger is
-    append-only and hash-chained, so a matching record is durable evidence.
-    Any read failure (missing file, corrupt line, unparseable timestamp)
-    returns ``False`` so the caller keeps fail-closed.
+
+def _placement_symbols(rec: Mapping[str, Any]) -> str | None:
+    """Return the normalized order symbol when ``rec`` is a placement record.
+
+    Evidence must be order-shaped: our own submit path always stamps
+    ``remote_tool="place_order"`` and the request payload that carried the
+    symbol (``service.place_order`` paper evidence, the live SDK gate's
+    ``dict(place_kwargs)``). A record that merely *mentions* a symbol — a tick
+    marker, a decision summary, a quote result — is not evidence that we placed
+    anything, so it returns ``None`` and the caller keeps fail-closed.
+    """
+    if str(rec.get("remote_tool") or "") not in _PLACEMENT_TOOLS:
+        return None
+    request = rec.get("broker_request")
+    if not isinstance(request, Mapping) or not request:
+        return None
+    symbol = request.get("symbol")
+    if isinstance(symbol, str) and symbol.strip():
+        return _normalize_symbol_for_audit(symbol)
+    return None
+
+
+def _audit_has_legit_fill(broker: str, symbol: str, since_ts: str | None) -> bool:
+    """Check the live-action ledger for our own accepted placement of ``symbol``.
+
+    An ``unknown_fill`` is downgraded to ``MATCHED`` only when the ledger holds
+    an accepted ``order_placed`` record for the same broker, strictly after the
+    last clean reconcile baseline, that is *order-shaped*: written by a
+    placement tool with a request payload naming that symbol (see
+    :func:`_placement_symbols`). The ledger is append-only and hash-chained, so
+    a matching record is durable evidence. Any read failure (missing file,
+    corrupt line) returns ``False`` so the caller keeps fail-closed.
 
     Args:
         broker: Runner key the ledger records under ``server``.
@@ -317,6 +342,8 @@ def _audit_has_legit_fill(broker: str, symbol: str, since_ts: str | None) -> boo
         lines = ledger.read_text(encoding="utf-8").splitlines()[-500:]
     except (OSError, ValueError):
         return False
+    if not want:
+        return False
     for line in reversed(lines):
         try:
             rec = json.loads(line)
@@ -328,19 +355,7 @@ def _audit_has_legit_fill(broker: str, symbol: str, since_ts: str | None) -> boo
             continue
         if since_ts and str(rec.get("ts", "")) <= since_ts:
             continue
-        haystack = _normalize_symbol_for_audit(
-            json.dumps(
-                {
-                    "intent": rec.get("intent_normalized"),
-                    "request": rec.get("broker_request"),
-                    "response": rec.get("broker_response"),
-                    "tool": rec.get("remote_tool"),
-                },
-                ensure_ascii=False,
-                default=str,
-            )
-        )
-        if want and want in haystack:
+        if _placement_symbols(rec) == want:
             return True
     return False
 

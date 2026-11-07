@@ -733,6 +733,58 @@ def _accepts_extra_kwargs(place_order_fn: Any) -> bool:
     return False
 
 
+def _runner_namespace(profile: TradingProfile) -> str:
+    """Return the audit/mandate namespace the profile acts under.
+
+    Mirrors ``_runner_key`` in the API layer: a live profile acts as its
+    connector key, while a paper/demo profile is namespaced ``<connector>-demo``
+    so demo evidence can never stand in for live actions (and live actions can
+    never stand in for demo evidence).
+    """
+    return profile.connector if profile.environment == "live" else f"{profile.connector}-demo"
+
+
+def _audit_paper_placement(
+    profile: TradingProfile, place_kwargs: dict[str, Any], result: Any, session_id: str
+) -> None:
+    """Write an order-shaped evidence row for a demo/paper placement.
+
+    The reconcile adoption rule requires ledger evidence naming the symbol in
+    an ``order_placed`` record under the runner namespace; without this row a
+    legitimate agent fill would be classified ``unknown_fill`` forever (the
+    tick marker alone carries no order identity). Best-effort: the placement
+    itself already happened, and an audit fault must not turn a good order into
+    an error envelope.
+    """
+    ok = isinstance(result, dict) and str(result.get("status", "")).lower() == "ok"
+    try:
+        from src.live.audit import LiveActionEvent, write_live_action
+
+        write_live_action(
+            LiveActionEvent(
+                kind="order_placed" if ok else "order_rejected",
+                session_id=session_id,
+                outcome="accepted" if ok else "error",
+                server=_runner_namespace(profile),
+                remote_tool="place_order",
+                intent_normalized=(
+                    f"paper place {place_kwargs.get('side', '')} "
+                    f"{place_kwargs.get('symbol', '')}".strip()
+                ),
+                mandate_snapshot_ref=None,
+                consent_record_ref=None,
+                broker_request=dict(place_kwargs),
+                broker_response=result if isinstance(result, dict) else {"raw": result},
+                gate_decision={"allowed": True, "decision": "allow", "environment": "paper"},
+                error=None if ok else (result.get("error") if isinstance(result, dict) else "paper order failed"),
+            ),
+            event_callback=None,
+            trace_writer=None,
+        )
+    except Exception:  # noqa: BLE001 - evidence must never break the trade
+        pass
+
+
 def place_order(
     symbol: str,
     profile_id: str | None = None,
@@ -822,7 +874,9 @@ def place_order(
         place_kwargs.update(attached)
 
     if profile.environment == "paper":
-        return _with_profile(profile, module.place_order(config, **place_kwargs))
+        result = module.place_order(config, **place_kwargs)
+        _audit_paper_placement(profile, place_kwargs, result, session_id)
+        return _with_profile(profile, result)
 
     # Live: pre-trade mandate gate.
     from src.live.enforcement import OrderIntent
@@ -887,11 +941,13 @@ def set_leverage(
 ) -> dict[str, Any]:
     """Set per-symbol leverage via a connector profile.
 
-    Paper profiles call the connector directly. Live profiles are gated: a
-    valid unexpired mandate must be on file, the kill switch must not be
-    tripped, and the requested multiple must not exceed the mandate's
-    ``max_leverage`` cap (fail-closed — no mandate, no set). Every live set is
-    audit-logged regardless of outcome.
+    Every environment is capped by the mandate filed under the profile's runner
+    namespace (``<connector>`` for live, ``<connector>-demo`` for paper, so a
+    rehearsal feels exactly the cap live would apply). Live profiles are
+    additionally gated: a valid unexpired mandate must be on file, the kill
+    switch must not be tripped, and every live set is audit-logged regardless
+    of outcome. A paper set with no demo mandate on file is unconstrained —
+    plain sandbox use keeps working.
     """
     profile = profile_by_id(profile_id)
     if profile.transport != "broker_sdk":
@@ -904,6 +960,9 @@ def set_leverage(
         return _unsupported(profile, "leverage.set")
 
     if profile.environment == "paper":
+        cap = _paper_leverage_cap(profile)
+        if cap is not None and _exceeds_cap(leverage, cap):
+            return _paper_leverage_deny(profile, leverage, cap)
         config = _sdk_config(profile, module, overrides)
         return _with_profile(profile, setter(config, symbol, leverage=leverage))
 
@@ -940,6 +999,55 @@ def set_leverage(
     result = setter(config, symbol, leverage=leverage)
     _audit_live_leverage(profile, symbol, leverage, result, session_id)
     return _with_profile(profile, result)
+
+
+def _exceeds_cap(leverage: Any, cap: float) -> bool:
+    """Return whether ``leverage`` is a number strictly above ``cap``.
+
+    An unparseable multiple is left to the connector's own validation (it
+    returns the same ``{"status": "error"}`` envelope), so this never masks a
+    bad-input error as a mandate denial.
+    """
+    try:
+        return float(leverage) > cap
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _paper_leverage_cap(profile: TradingProfile) -> float | None:
+    """Return the demo mandate's leverage cap for a paper profile, if any.
+
+    The demo runner files its mandate under ``<connector>-demo`` (see
+    ``_runner_key`` in the API layer); that is the cap a rehearsal must feel.
+    Absent/unreadable mandate means unconstrained paper trading, not a denial.
+    """
+    try:
+        from src.live.mandate.store import load_mandate
+
+        mandate = load_mandate(_runner_namespace(profile))
+    except Exception:  # noqa: BLE001 - paper trading must not depend on the live store
+        return None
+    if mandate is None:
+        return None
+    try:
+        return float(mandate.hard_caps.max_leverage)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _paper_leverage_deny(profile: TradingProfile, leverage: Any, cap: float) -> dict[str, Any]:
+    """Refuse a paper leverage set above the demo mandate cap.
+
+    Not written to the live-action ledger: it is a rehearsal refusal, not a
+    live action. The reason string names the cap so the agent can recover.
+    """
+    return {
+        "status": "error",
+        "profile": profile.id,
+        "connector": profile.connector,
+        "environment": profile.environment,
+        "error": f"requested leverage {leverage} exceeds demo mandate max_leverage {cap}",
+    }
 
 
 def _live_leverage_deny(

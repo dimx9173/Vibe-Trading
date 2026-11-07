@@ -650,6 +650,39 @@ def test_service_place_attaches_takeprofit_stoploss_to_bybit(monkeypatch, order_
     assert result["order_id"] == "ord-tp"
 
 
+def test_service_paper_placement_writes_order_shaped_ledger_evidence(monkeypatch, order_client):
+    """A demo fill must leave evidence reconcile can adopt (symbol + tool)."""
+    import json as _json
+
+    import src.live.audit as audit_mod
+    from src.trading import service
+
+    ledger = audit_mod.audit_ledger_path()
+    before = len(ledger.read_text(encoding="utf-8").splitlines()) if ledger.is_file() else 0
+
+    def create_order(symbol, order_type, side, amount, price=None, params=None):
+        return {"id": "ord-ev", "symbol": symbol, "side": side, "type": order_type,
+                "status": "open", "filled": 0, "amount": amount, "price": price}
+
+    order_client.create_order = create_order
+    result = service.place_order("ETH-USDT", "bybit-paper-trade", side="buy", quantity=0.11)
+    assert result["status"] == "ok"
+
+    new_rows = [
+        _json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()[before:]
+        if line.strip()
+    ]
+    assert len(new_rows) == 1
+    row = new_rows[0]
+    assert row["server"] == "bybit-demo"
+    assert row["kind"] == "order_placed"
+    assert row["remote_tool"] == "place_order"
+    assert row["outcome"] == "accepted"
+    assert row["broker_request"]["symbol"] == "ETH-USDT"
+    assert row["broker_request"]["quantity"] == 0.11
+
+
 def test_service_place_refuses_attached_params_on_binance(monkeypatch):
     from src.trading import service
 
@@ -758,6 +791,54 @@ def test_service_set_leverage_paper_routes_to_module(monkeypatch, order_client):
     result = service.set_leverage("BTC-USDT", "bybit-paper-trade", leverage=5)
     assert result["status"] == "ok"
     assert got == {"leverage": 5, "symbol": "BTC/USDT:USDT"}
+
+
+def _bybit_demo_mandate(max_leverage: float):
+    """Same shape as the live fixture, keyed under the ``bybit-demo`` runner."""
+    return _bybit_live_mandate(max_leverage)
+
+
+def test_service_set_leverage_paper_over_demo_cap_denied(monkeypatch, order_client):
+    from src.trading import service
+
+    order_client.set_leverage = lambda *a: (_ for _ in ()).throw(
+        AssertionError("must not reach broker")
+    )
+    monkeypatch.setattr(
+        "src.live.mandate.store.load_mandate",
+        lambda broker: _bybit_demo_mandate(3) if broker == "bybit-demo" else None,
+    )
+    result = service.set_leverage("BTC-USDT", "bybit-paper-trade", leverage=10)
+    assert result["status"] == "error"
+    assert "max_leverage" in result["error"]
+
+
+def test_service_set_leverage_paper_within_demo_cap_executes(monkeypatch, order_client):
+    from src.trading import service
+
+    got: dict = {}
+
+    def set_leverage(leverage, symbol, params=None):
+        got.update(leverage=leverage, symbol=symbol)
+        return {"retMsg": "OK"}
+
+    order_client.set_leverage = set_leverage
+    monkeypatch.setattr(
+        "src.live.mandate.store.load_mandate",
+        lambda broker: _bybit_demo_mandate(3) if broker == "bybit-demo" else None,
+    )
+    result = service.set_leverage("BTC-USDT", "bybit-paper-trade", leverage=2)
+    assert result["status"] == "ok"
+    assert got == {"leverage": 2, "symbol": "BTC/USDT:USDT"}
+
+
+def test_service_set_leverage_paper_without_demo_mandate_unconstrained(monkeypatch, order_client):
+    from src.trading import service
+
+    order_client.set_leverage = lambda leverage, symbol, params=None: {"retMsg": "OK"}
+    monkeypatch.setattr("src.live.mandate.store.load_mandate", lambda broker: None)
+    result = service.set_leverage("BTC-USDT", "bybit-paper-trade", leverage=10)
+    assert result["status"] == "ok"
 
 
 def test_service_set_leverage_refused_on_binance():
