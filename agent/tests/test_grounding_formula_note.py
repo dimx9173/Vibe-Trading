@@ -116,3 +116,50 @@ def test_descriptive_colon_keeps_derived_grounding_checks(
     assert result.valid is (reason is None), result.issues
     if reason is not None:
         assert reason in {issue.get("reason") for issue in result.issues}, result.issues
+
+
+def test_a_rounding_call_restates_an_observed_measurement(tmp_path: Path) -> None:
+    """``round(x, n)`` is presentation of an observation, not a new number.
+
+    Live decisions quote indicators at the precision they reason with
+    ("RSI 38.4") while the tool returns full float precision. Before this
+    rule, every such note failed with ``formula_not_evaluable``, two revision
+    rounds exhausted the tick, and the runner released its safe fallback.
+    """
+    ledger = GroundingLedger(run_dir=tmp_path, user_message="autonomous BTC-USDT tick")
+    ledger.ingest_tool_result(
+        tool_name="technical_indicators",
+        arguments={"symbol": "BTC-USDT"},
+        call_id="ti1",
+        success=True,
+        result=json.dumps({"ok": True, "symbol": "BTC-USDT", "indicators": {"rsi_14": 38.399791901175355}}),
+    )
+    answer = (
+        "BTC-USDT RSI read 38.4.\n"
+        "```figures\n38.4 | derived | round(38.399791901175355, 1) | ti1\n```"
+    )
+
+    verdict = ledger.validate_final_answer(answer)
+
+    assert verdict.valid is True, verdict.issues
+
+
+def test_a_rounding_call_cannot_anchor_an_unobserved_measurement(tmp_path: Path) -> None:
+    """Rounding is not a way to invent a number: the operand must be evidence."""
+    ledger = GroundingLedger(run_dir=tmp_path, user_message="autonomous BTC-USDT tick")
+    ledger.ingest_tool_result(
+        tool_name="technical_indicators",
+        arguments={"symbol": "BTC-USDT"},
+        call_id="ti1",
+        success=True,
+        result=json.dumps({"ok": True, "symbol": "BTC-USDT", "indicators": {"rsi_14": 38.399791901175355}}),
+    )
+    answer = (
+        "BTC-USDT RSI read 12.3.\n"
+        "```figures\n12.3 | derived | round(51.7712, 1) | ti1\n```"
+    )
+
+    verdict = ledger.validate_final_answer(answer)
+
+    assert verdict.valid is False
+    assert {issue.get("reason") for issue in verdict.issues} == {"formula_not_anchored"}

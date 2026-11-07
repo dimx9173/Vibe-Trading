@@ -319,12 +319,14 @@ def _evaluate_formula(
         .replace("–", "-")
         .replace("（", "(")
         .replace("）", ")")
-        .replace(",", "")
         .replace("²", "**2")
         .replace("³", "**3")
         .replace("^", "**")
         .strip()
     )
+    # Grouping commas go, argument separators stay: "76,019.3 - 76,019.2" is
+    # arithmetic, "round(76019.3, 2)" is a call whose comma is punctuation.
+    normalized = _GROUPING_COMMA_RE.sub("", normalized)
     # "12.87% − 11.36%" is 0.1287 − 0.1136: an operand written as a percent is
     # the fraction the evidence holds, and "0.666 × (1 − 3%)" means 0.97.
     normalized = _PERCENT_OPERAND_RE.sub(
@@ -347,6 +349,11 @@ def _evaluate_formula(
             return operand_transform(value) if operand_transform and not (unit_one and value == 1) else value
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             value = visit(node.operand)
+            if isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
+                # The operand IS the measurement ("round(-310.5453, 1)"); an
+                # unsigned record would never anchor against the observed
+                # negative value.
+                inputs[-1] = -inputs[-1]
             return value if isinstance(node.op, ast.UAdd) else -value
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
             # A square or a cube (HHI is a sum of squared weights). The
@@ -374,19 +381,61 @@ def _evaluate_formula(
             if right == 0:
                 raise ValueError("division by zero")
             return left / right
+        if isinstance(node, ast.Call):
+            # ``round(x, n)`` restates an observed measurement at the precision
+            # it is quoted with; the digit count is presentation, not an
+            # operand, so it never becomes an anchor. The data operand keeps
+            # every anchoring check below, so this cannot launder an unobserved
+            # number into a derivation.
+            func = node.func
+            if (
+                isinstance(func, ast.Name)
+                and func.id == "round"
+                and 1 <= len(node.args) <= 2
+                and not node.keywords
+            ):
+                value = visit(node.args[0])
+                if len(node.args) == 1:
+                    return round(value)
+                digits = node.args[1]
+                if (
+                    isinstance(digits, ast.Constant)
+                    and isinstance(digits.value, int)
+                    and not isinstance(digits.value, bool)
+                ):
+                    return round(value, digits.value)
+            raise ValueError("unsupported formula")
         raise ValueError("unsupported formula")
 
     try:
         value = visit(tree)
     except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
-    if len(inputs) < 2 or not math.isfinite(value):
+    # A rounding operator is the only shape whose single data operand is
+    # enough: the caller still requires that operand to be observed.
+    rounding = _is_rounding_call(tree.body)
+    if (len(inputs) < 2 and not rounding) or not math.isfinite(value):
         return None
     return value, inputs, tree
 
 
+def _is_rounding_call(node: ast.AST) -> bool:
+    """Whether a formula's root is a ``round(x[, n])`` presentation operator."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "round"
+        and 1 <= len(node.args) <= 2
+        and not node.keywords
+    )
+
+
 #: A number written with a percent sign inside a formula.
 _PERCENT_OPERAND_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
+
+#: A grouping comma inside one number: "76,019.3" but never "round(x, 2)".
+_GROUPING_COMMA_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+
 
 
 def _is_small_exponent(node: ast.AST) -> bool:

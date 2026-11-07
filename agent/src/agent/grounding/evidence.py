@@ -106,6 +106,15 @@ _GENERIC_PRICE_FIELD_ALIASES = {
     "settlement": "price",
     "settle_price": "price",
     "vwap": "price",
+    # A broker quote's two sides are prices in their own right: a bid/ask a
+    # trading connector returned is an observed print, not a ratio, so a
+    # currency-marked figure quoting it must find it in the money pool.
+    "bid": "price",
+    "bid_price": "price",
+    "bidprice": "price",
+    "ask": "price",
+    "ask_price": "price",
+    "askprice": "price",
     "现价": "price",
     "最新价": "price",
 }
