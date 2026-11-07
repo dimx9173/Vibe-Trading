@@ -283,10 +283,13 @@ def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime, profile_id
         "1. `trading_connections` — confirm the trading connection id.\n"
         "2. `trading_quote` for EACH candidate symbol (price, bid/ask, 24h change).\n"
         "3. `technical_indicators` for EACH candidate symbol (RSI, MACD, Bollinger).\n"
-        "4. Decide: HOLD (name the missing condition) or ORDER (cite the readings).\n"
+        "4. `trading_set_leverage` for EACH symbol you intend to trade — set it "
+        "explicitly within the max gross leverage above; never rely on the "
+        "broker's account default (skipped when only holding or closing).\n"
+        "5. Decide: HOLD (name the missing condition) or ORDER (cite the readings).\n"
         'Example: trading_connections -> trading_quote(symbol="BTC-USDT") + '
         'technical_indicators(symbol="BTC-USDT") -> HOLD "RSI 55 neutral, no edge" '
-        'or ORDER with TP/SL justified by the quote. Skipping steps 2-3 and '
+        'or ORDER with TP/SL justified by the quote. Skipping steps 2-3, '
         "deciding from memory is a prompt violation.\n\n"
         "=== DISCOVERY UNIVERSE (pick symbols within these structural filters) ===\n"
         f"- Asset classes: {asset_classes}\n"

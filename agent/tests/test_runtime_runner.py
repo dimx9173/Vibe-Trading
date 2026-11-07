@@ -235,6 +235,8 @@ def test_pin_mandate_prompt_includes_full_mandate() -> None:
     assert "=== REQUIRED TOOL CALL SEQUENCE" in prompt
     assert "Skipping steps 2-3" in prompt
     assert "`technical_indicators`" in prompt
+    # Leverage discipline: set per-symbol leverage before trading; no broker default.
+    assert "`trading_set_leverage`" in prompt
 
 
 # --------------------------------------------------------------------------- #
