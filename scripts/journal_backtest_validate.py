@@ -228,6 +228,18 @@ def main(argv: list[str] | None = None) -> int:
     base_hours, base_fee, base_entry, base_stats, base_values = grid[
         [i for i, g in enumerate(grid) if g[0] == 24.0 and g[1] == "taker" and g[2] == "next-open"][0]
     ]
+    baseline: list[float] = []
+    baseline_cache: dict[tuple[str, dt.date], list[Any]] = {}
+    for t in _trades(j, rows, horizons=(24.0,), fee=TAKER):
+        bars = _bars_for(j, baseline_cache, t["symbol"], t["started"])
+        exit_bar = _exit_bar(bars, t["started"], 24.0)
+        if exit_bar is None:
+            continue
+        exit_px = _df(exit_bar)
+        qty = NOTIONAL / t["entry"]
+        baseline.append((exit_px - t["entry"]) * qty - 2.0 * NOTIONAL * TAKER)
+    baseline_net = sum(baseline)
+
     lo, hi = _block_bootstrap(base_values, BOOT_REPS, BLOCK, SEED)
     p_value = _permutation_p(base_values, PERM_REPS, SEED + 1)
 
@@ -246,6 +258,60 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- sign-flip permutation ({PERM_REPS} reps): two-sided p = {p_value:.3f}")
 
     print()
+    print("## Both-side screen (directional skill)")
+    print()
+    print("| side | n | net USD | mean | win% |")
+    print("|---|---|---|---|---|")
+    for side, label in ((False, "long"), (True, "short")):
+        values = []
+        for t in _trades(j, rows, horizons=(24.0,), fee=TAKER):
+            bars = _bars_for(j, {}, t["symbol"], t["started"])
+            exit_bar = _exit_bar(bars, t["started"], 24.0)
+            if exit_bar is None:
+                continue
+            exit_px = _df(exit_bar)
+            qty = NOTIONAL / t["entry"]
+            move = (t["entry"] - exit_px) if side else (exit_px - t["entry"])
+            values.append(move * qty - 2.0 * NOTIONAL * TAKER)
+        if not values:
+            continue
+        s = _stats(values)
+        print(
+            f"| {label} | {s['n']} | {s['net']:+.2f} | {s['mean']:+.3f} | "
+            f"{s['win_rate']:.0f} |"
+        )
+
+    text_short = sum(
+        1
+        for row in rows
+        if j._decision_label(row.answer) == "ORDER"
+        and ("SHORT" in row.answer.upper() or "SELL" in row.answer.upper())
+    )
+    orders_with_side = sum(
+        1
+        for row in rows
+        for order in row.orders
+        if isinstance(order.get("broker_request"), dict)
+        and str(order["broker_request"].get("side", "")).strip()
+    )
+    print()
+    print(
+        f"Side evidence: {orders_with_side} ledger row(s) name a side; "
+        f"{text_short} ORDER decision(s) mention SHORT or SELL in prose. "
+        "Without a ledger side the replay scores the decision long, so a short "
+        "intention recorded only in prose is priced on the wrong side."
+    )
+
+    print()
+    print("## Always-long baseline over the same windows")
+    print()
+    print(f"- decisions net {base_stats['net']:+.2f} | baseline net {baseline_net:+.2f} "
+          f"| excess {base_stats['net'] - baseline_net:+.2f} USD")
+    print(
+        "- a HOLD decision scores as long by construction, so the baseline only "
+        "diverges when a decision is evidenced as short."
+    )
+
     print("## Split by preceding BTC 24h return")
     print()
     print("| prior 24h band | n | net USD | mean | win% |")
