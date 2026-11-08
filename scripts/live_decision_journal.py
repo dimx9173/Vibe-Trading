@@ -297,8 +297,10 @@ def _bars(symbol: str, at: dt.datetime) -> list[tuple[dt.datetime, float | None,
     """
     from src.market_data import fetch_market_data
 
+    today = dt.datetime.now(dt.timezone.utc).date()
     start = (at - dt.timedelta(days=2)).date().isoformat()
-    end = (at + dt.timedelta(days=2)).date().isoformat()
+    end = min((at + dt.timedelta(days=2)).date(), today).isoformat()
+
     try:
         payload = fetch_market_data(
             codes=[symbol], start_date=start, end_date=end, interval="1H", max_rows=200
@@ -492,10 +494,11 @@ def _replay(
             "real_uPnl_now": move * qty - fee,
         }
 
-    finished = row.started
-    if isinstance(row.finished, (int, float)) and row.finished > 0:
-        finished = dt.datetime.fromtimestamp(float(row.finished), dt.timezone.utc)
-    after = [item for item in bars if item[0] > finished]
+    # decisions.sqlite3 stores `finished` as a 0/1 flag, not a timestamp, and
+    # the decision completes minutes after `started` anyway: the replay entry
+    # is the first bar that opens after started.
+    after = [item for item in bars if item[0] > row.started]
+
     if not after:
         return empty
     entry = after[0][1] if after[0][1] is not None else after[0][2]
