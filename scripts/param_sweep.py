@@ -31,13 +31,6 @@ STRATEGIES: dict[str, str] = {
         "Top/bottom-quantile cross-sectional momentum on a daily close panel, "
         "weekly rebalance, dollar-neutral."
     ),
-    "funding_fade": (
-        "Fade extreme funding deciles: long bottom-decile, short top-decile, "
-        "fixed holding window."
-    ),
-    "weekend_window": (
-        "Calendar-only long over the Friday-20:00-to-Monday-00:00 UTC window."
-    ),
 }
 
 
@@ -119,12 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     for combo in combos:
         params = dict(zip(names, combo))
         tag = "_".join(f"{n}={v}" for n, v in params.items())
-        if args.strategy == "cross_sectional_momentum":
-            s = _xsec_momentum_weekly(panel, int(params["lookback"]),
-                                      int(params["skip"]),
-                                      float(params["quantile"]))
-        else:
-            raise ValueError(f"strategy {args.strategy} needs its own runner")
+        s = _xsec_momentum_weekly(panel, int(params["lookback"]),
+                                  int(params["skip"]),
+                                  float(params["quantile"]))
         s.to_csv(trials_dir / f"{tag}.csv", index_label="date")
         trial_frames[tag] = s
         manifest.append({"params": params, "n_weeks": len(s),
