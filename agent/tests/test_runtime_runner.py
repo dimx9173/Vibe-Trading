@@ -699,3 +699,22 @@ def test_interval_only_runner_ignores_the_market_gate() -> None:
 
     assert result["outcome"] == TICK_INVOKED
     assert "invoke" in tracker.calls
+
+
+def test_invoked_tick_writes_tick_completed_not_order_placed() -> None:
+    """Tick markers must not be order-shaped.
+
+    Regression: ``_invoke_and_audit`` used ``kind="order_placed"`` for the
+    post-tick marker. ``_placement_symbols`` only trusts records whose
+    ``remote_tool`` is a placement tool, so the marker could never adopt a
+    position — but the kind was a lie that poisoned every downstream
+    ``order_placed`` count (the bybit-demo ledger held 42 markers and 0
+    placements under one kind). The marker is now ``tick_completed``.
+    """
+    tracker = _OrderTracker()
+    runner = _build_runner(tracker)
+    result = asyncio.run(runner.run_once())
+
+    assert result["outcome"] == TICK_INVOKED
+    assert tracker.audits[-1]["kind"] == "tick_completed"
+    assert tracker.audits[-1]["outcome"] == "accepted"

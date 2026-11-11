@@ -591,7 +591,7 @@ class LiveRunner:
             return TickResult(outcome="waiting", broker=self.broker, reason="decision cadence").to_dict()
 
         audit_id = self._audit(
-            kind="order_placed",
+            kind="tick_completed",
             outcome="accepted",
             intent="autonomous tick completed",
             agent_result=result,
