@@ -293,6 +293,13 @@ def _pin_mandate_prompt(broker: str, mandate: Mandate, now: datetime, profile_id
         "explicitly within the max gross leverage above; never rely on the "
         "broker's account default (skipped when only holding or closing).\n"
         "5. Decide: HOLD (name the missing condition) or ORDER (cite the readings).\n"
+        "Identity lock: the run locks the first symbol it resolves, and every "
+        "other symbol is then rejected with `identity_mismatch`. Call "
+        "`search_symbol` for EACH candidate symbol in its own turn BEFORE quoting "
+        "any of them, and only then quote them.\n"
+        "History windows: `get_market_data` answers only the dates you ask for, "
+        "so never repeat a single-day range. If you need bars, ask once with a "
+        "wide range (start_date at least 60 days back) and reuse that answer.\n"
         'Example: trading_connections -> trading_quote(symbol="BTC-USDT") + '
         'technical_indicators(symbol="BTC-USDT") -> HOLD "RSI 55 neutral, no edge" '
         'or ORDER with TP/SL justified by the quote. Skipping steps 2-3, '

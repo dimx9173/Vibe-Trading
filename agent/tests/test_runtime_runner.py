@@ -718,3 +718,13 @@ def test_invoked_tick_writes_tick_completed_not_order_placed() -> None:
     assert result["outcome"] == TICK_INVOKED
     assert tracker.audits[-1]["kind"] == "tick_completed"
     assert tracker.audits[-1]["outcome"] == "accepted"
+
+
+def test_pin_mandate_prompt_names_identity_lock_and_wide_windows() -> None:
+    """Prompt text only. The 11-11 tick lost 8 rounds to identity_mismatch retries and single-day repeats."""
+    mandate = _make_mandate(expires_at=_future_expiry())
+    prompt = _pin_mandate_prompt(BROKER, mandate, _FIXED_NOW)
+
+    assert "identity_mismatch" in prompt
+    assert "`search_symbol`" in prompt
+    assert "at least 60 days back" in prompt
