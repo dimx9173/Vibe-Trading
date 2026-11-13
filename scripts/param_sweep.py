@@ -87,6 +87,46 @@ def _xsec_momentum_weekly(panel: pd.DataFrame, lookback: int, skip: int,
     return pd.Series(weeks, index=pd.DatetimeIndex(idx), name="ret")
 
 
+def _open_registered_hypothesis(hypothesis_id: str) -> int | None:
+    """Refuse the sweep unless the idea is registered and still open.
+
+    A sweep that runs before registration is the cherry-pick the deflated
+    Sharpe cannot see: the trial matrix pays for the search, but nothing links
+    the search to the claim it is supposed to test, so the claim arrives after
+    the data. Registration first makes every grid lookup a recorded test.
+
+    Args:
+        hypothesis_id: Registry identifier the sweep answers to.
+
+    Returns:
+        ``None`` when the hypothesis is open for testing, else exit code 2.
+    """
+    from src.hypotheses.registry import HypothesisRegistry
+
+    open_states = {"exploring", "testing"}
+    try:
+        records = HypothesisRegistry().list()
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry cannot authorize a search
+        print(f"hypothesis registry unreadable: {exc}", file=sys.stderr)
+        return 2
+    match = next((h for h in records if h.hypothesis_id == hypothesis_id), None)
+    if match is None:
+        print(
+            f"unknown hypothesis {hypothesis_id!r}; register it first "
+            f"(exploring -> testing) so the sweep answers to a recorded claim",
+            file=sys.stderr,
+        )
+        return 2
+    if match.status not in open_states:
+        print(
+            f"hypothesis {hypothesis_id!r} is {match.status!r}; reopen it as "
+            f"'testing' before sweeping it again",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry: sweep, persist the trial matrix, judge the winner."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -95,8 +135,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="JSON mapping param name -> list of values")
     ap.add_argument("--panel-dir", default="/tmp/h5_panel")
     ap.add_argument("--out", required=True, help="output directory")
-    ap.add_argument("--hypothesis-id", default="")
+    ap.add_argument("--hypothesis-id", required=True)
     args = ap.parse_args(argv)
+
+    gate = _open_registered_hypothesis(args.hypothesis_id)
+    if gate is not None:
+        return gate
 
     grid: dict[str, list] = json.loads(args.grid)
     names = list(grid)
@@ -140,16 +184,16 @@ def main(argv: list[str] | None = None) -> int:
         json.dump({"best_params": best, "verdict": verdict}, fh,
                   indent=2, default=str)
 
-    if args.hypothesis_id:
-        from src.hypotheses.registry import HypothesisRegistry
-        HypothesisRegistry().link_backtest(
-            args.hypothesis_id,
-            run_card_path=str((out / "verdict.json").resolve()),
-            metrics={"n_trials": n_trials, "best": best,
-                     "promote": verdict["promote"]},
-            validation=verdict.get("gates", {}),
-            notes=f"param_sweep.py {args.strategy} ({n_trials} trials)",
-        )
+    from src.hypotheses.registry import HypothesisRegistry
+
+    HypothesisRegistry().link_backtest(
+        args.hypothesis_id,
+        run_card_path=str((out / "verdict.json").resolve()),
+        metrics={"n_trials": n_trials, "best": best,
+                 "promote": verdict["promote"]},
+        validation=verdict.get("gates", {}),
+        notes=f"param_sweep.py {args.strategy} ({n_trials} trials)",
+    )
     best_tag = "_".join(f"{n}={v}" for n, v in best["params"].items())
     print(json.dumps({"best": best_tag, "promote": verdict["promote"],
                       "dsr": verdict.get("gates", {}).get("deflated_sharpe"),
