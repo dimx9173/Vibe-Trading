@@ -73,6 +73,13 @@ _ORDINAL_RE = re.compile(r"(?m)^[^\S\n]*(?:#{1,6}[^\S\n]*)?\d{1,3}[.)、][^\S\n]
 _INDEX_CELL_RE = re.compile(r"\d{1,3}[.)]?")
 _CELL_WORD_RE = re.compile(r"[^\W\d_]{2,}")
 
+
+# SHAPE 6 — a bar-interval label ("4H", "1d", "15m"): a number glued to one
+# interval letter, never a measurement. A tick prompt names these constantly
+# ("4H RSI 31.2"), and the bare 4 would otherwise be claimed as an observed
+# figure no evidence holds.
+_INTERVAL_RE = re.compile(r"(?<![\d.])\d{1,4}[Hh](?![A-Za-z0-9_])")
+
 # A compact year-horizon label ("1Y", "10y") in a table cell names a column or row, not
 # a measurement. Deliberately narrow: a one-letter "M" stays a magnitude suffix ("5M"),
 # and multi-letter labels ("12mo", "1yr") already read as worded cells.
@@ -493,12 +500,18 @@ def _numbers(text: str, *, decimal_commas: bool | None = None) -> list[_Token]:
         if comma_decimals or match.group(0).count(".") >= 2
     ]
     protected = dotted + dotted_grouped
+    intervals = [
+        (match.start(), match.end())
+        for match in _INTERVAL_RE.finditer(text)
+    ]
     tokens: list[_Token] = []
     cursor = 0
     for match in _NUMBER_RE.finditer(text):
         if match.start() < cursor:
             continue
         if any(token.start <= match.start() < token.end for token in protected):
+            continue
+        if any(start <= match.start() < end for start, end in intervals):
             continue
         raw = match.group(0)
         sign = raw[0] if raw[0] in "+-" else ""

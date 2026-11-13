@@ -28,6 +28,7 @@ from src.agent.grounding.evidence import (
     _is_metadata_count_leaf,
     _is_number,
     _is_price_kind,
+    _is_reading_tool,
     _keyed_metric_map_kind,
     _metric_kind_for_path,
     _price_field_for_path,
@@ -1616,6 +1617,44 @@ class _PolicyMixin:
         )
         return values
 
+    def _reading_pool(self, symbol: str | None) -> list[float]:
+        """Non-price, non-metric numbers other tools observed in this session.
+
+        A live tick cites an indicator ("4H RSI 31.2") or an account fact
+        ("balance 41,030"). Both arrived through the run's own tool calls, but
+        an indicator leaf is neither a registered price nor an analysis metric,
+        and an account number carries no instrument, so the price and metric
+        pools held neither. Every such answer was rejected as conflicting with
+        the instrument's price envelope, which no tick could ever satisfy.
+
+        A reading stays bound the way the price pool binds it: an attributed
+        figure sees this symbol plus the symbol-less account records, and a
+        figure that names no instrument in a run holding two is answered only
+        by account records, never by one instrument's indicator.
+
+        Args:
+            symbol: The instrument the figure was attributed to, or ``None``.
+
+        Returns:
+            Observed non-market, non-metric values in the figure's scope.
+        """
+        attributed = {record.symbol for record in self._evidence if record.symbol}
+        if symbol is None and len(attributed) > 1:
+            keep = lambda record: not record.symbol  # noqa: E731 - one-line scope test
+        elif symbol is None:
+            keep = lambda record: True  # noqa: E731 - single instrument, one scope
+        else:
+            keep = lambda record: not record.symbol or record.symbol == symbol  # noqa: E731
+        return [
+            float(record.value)
+            for record in self._evidence
+            if record.status == "observed"
+            and record.value is not None
+            and _is_reading_tool(record.tool)
+            and _metric_kind_for_path(record.field) is None
+            and keep(record)
+        ]
+
     def _matches_evidence(
         self,
         figure: Figure,
@@ -1852,7 +1891,8 @@ class _PolicyMixin:
                 currency_code=figure.currency_code,
             ), []
         else:
-            direct, scaled = prices + self._row_pool(symbol), self._metric_pool(symbol)
+            direct = prices + self._row_pool(symbol) + self._reading_pool(symbol)
+            scaled = self._metric_pool(symbol)
         # An undeclared tail-risk figure is matched against every tail-risk
         # value in the session, so it needs a field ref for the same reason a
         # call-scoped one does (#1425).

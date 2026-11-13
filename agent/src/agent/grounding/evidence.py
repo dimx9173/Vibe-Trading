@@ -511,6 +511,31 @@ _REGISTERED_PRICE_INDICATORS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Tick-reading tools whose non-price, non-metric leaves ground what the run
+# cites. An indicator level (RSI) or an account balance arrives through the
+# run's own calls, but prices and metrics hold neither. Without this set the
+# reading pool in policies admits every non-market tool, including backtest
+# metrics the undeclared-figure gate keeps shut.
+_READING_TOOLS = frozenset(
+    {
+        "trading_quote",
+        "technical_indicators",
+        "trading_account",
+        "trading_positions",
+        "trading_orders",
+        "trading_history",
+        "trading_set_leverage",
+        "trading_select_connection",
+        "trading_connections",
+    }
+)
+
+
+def _is_reading_tool(tool: str | None) -> bool:
+    """Whether a tool's leaves are tick readings that ground a cited figure."""
+    return str(tool or "") in _READING_TOOLS
+
+
 _FUND_NAV_PRICE_FIELDS = frozenset({"unit_nav", "accumulated_nav", "adjusted_nav"})
 
 def _is_registered_price_indicator(tool: str, path: str) -> bool:
