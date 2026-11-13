@@ -1167,3 +1167,95 @@ def test_build_live_runner_read_error_envelope_raises(tmp_path, monkeypatch) -> 
     runner = api_server._build_live_runner("robinhood")
     with pytest.raises(RuntimeError, match="connection reset while reading positions"):
         runner._read_positions()
+
+
+def test_a_failed_model_decision_does_not_trip_the_kill_switch(tmp_path, monkeypatch) -> None:
+    """Cognition failure is not a broker breach.
+
+    Regression: one ``no_progress`` tick on 2026-11-11 flipped the halt and the
+    runner aborted every later tick for 13 hours. A failed decision places no
+    order, so reconcile stays the broker-state backstop and the next tick must
+    still be allowed to run.
+    """
+    from src.live.halt import halt_flag_set
+    from src.session.events import EventBus
+    from src.session.service import SessionService
+    from src.session.store import SessionStore
+
+    _live_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(api_server, "_mandate_account_ref", lambda broker: "acct_test")
+    monkeypatch.setattr(api_server, "_live_broker_adapter", lambda broker: SimpleNamespace(call_tool=lambda *a: {}))
+
+    async def scenario() -> None:
+        bus = EventBus()
+        bus.set_loop(asyncio.get_running_loop())
+        svc = SessionService(SessionStore(base_dir=tmp_path / "sessions"), bus, runs_dir=tmp_path / "runs")
+
+        async def attempt(_attempt, **_kwargs):
+            # The model ran and spent tokens before it stalled, so usage is
+            # reported; only the decision is missing.
+            bus.emit(_attempt.session_id, "llm_usage", {"iter": 1, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
+            return {"status": "failed", "reason": "no_progress: repeated result"}
+
+        monkeypatch.setattr(svc, "_run_with_agent", attempt)
+        monkeypatch.setattr(api_server, "_get_session_service", lambda: svc)
+        runner = api_server._build_live_runner("robinhood")
+
+        with pytest.raises(RuntimeError, match="no_progress"):
+            await runner._agent_caller(runner._session_id, "decision")
+        assert not halt_flag_set("robinhood")
+
+    asyncio.run(scenario())
+
+
+def test_budget_settings_are_read_per_decision(tmp_path, monkeypatch) -> None:
+    """A saved cadence applies to the next decision without rebuilding the runner.
+
+    The runner captured its settings once at build time, so a 2026-11-10
+    operator change (5 decisions/day down to 1) was ignored for three days.
+    """
+    from datetime import datetime as _dt, timedelta, timezone
+
+    import src.api.live_routes as routes
+    from src.live.runtime.decision_budget import DecisionBudget, DecisionSettings
+    from src.session.events import EventBus
+    from src.session.service import SessionService
+    from src.session.store import SessionStore
+
+    _live_env(tmp_path, monkeypatch)
+
+    class Clock(_dt):
+        current = _dt(2026, 10, 15, 14, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(routes, "datetime", Clock)
+    monkeypatch.setattr(api_server, "_mandate_account_ref", lambda broker: "acct_test")
+    monkeypatch.setattr(api_server, "_live_broker_adapter", lambda broker: SimpleNamespace(call_tool=lambda *a: {}))
+    budget = DecisionBudget("robinhood")
+    budget.save_settings(DecisionSettings(interval_seconds=3600, max_daily_turns=5, max_daily_tokens=10_000))
+
+    async def scenario() -> None:
+        bus = EventBus()
+        bus.set_loop(asyncio.get_running_loop())
+        svc = SessionService(SessionStore(base_dir=tmp_path / "sessions"), bus, runs_dir=tmp_path / "runs")
+
+        async def attempt(_attempt, **_kwargs):
+            bus.emit(_attempt.session_id, "llm_usage", {"iter": 1, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
+            return {"status": "success", "content": "hold"}
+
+        monkeypatch.setattr(svc, "_run_with_agent", attempt)
+        monkeypatch.setattr(api_server, "_get_session_service", lambda: svc)
+        runner = api_server._build_live_runner("robinhood")
+
+        assert (await runner._agent_caller(runner._session_id, "decision"))["status"] == "success"
+        Clock.current += timedelta(seconds=61)
+        assert (await runner._agent_caller(runner._session_id, "decision"))["status"] == "waiting"
+
+        budget.save_settings(DecisionSettings(interval_seconds=60, max_daily_turns=5, max_daily_tokens=10_000))
+        Clock.current += timedelta(seconds=1)
+        assert (await runner._agent_caller(runner._session_id, "decision"))["status"] == "success"
+
+    asyncio.run(scenario())

@@ -582,9 +582,9 @@ class LiveRunner:
         except Exception as exc:
             logger.exception("live agent invocation failed for %s", self.broker)
             audit_id = self._audit(
-                kind="breach",
+                kind="tick_completed",
                 outcome="error",
-                intent="autonomous tick — agent invocation error",
+                intent="autonomous tick — model produced no decision (no order placed)",
                 error=str(exc),
             )
             return TickResult(

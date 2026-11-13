@@ -959,12 +959,14 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
     settings = budget.settings()
 
     async def _agent_caller(sid: str, prompt: str) -> Dict[str, Any]:
-        from src.live.halt import trip_halt
-
         decision = None
         failed = False
         try:
-            decision = budget.begin(settings, datetime.now(timezone.utc))
+            # Operator-owned cadence and budget are read on every use, not once
+            # when the runner is built, so a settings change takes effect on the
+            # next decision without restarting the runner.
+            attempt_settings = budget.settings()
+            decision = budget.begin(attempt_settings, datetime.now(timezone.utc))
             if decision is None:
                 return {"status": "waiting"}
             # Broker state and the pinned mandate are reconstructed each tick.
@@ -972,8 +974,10 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
             # each retry opens a fresh tick session for the same reason.
             def record_usage(data: Dict[str, Any]) -> None:
                 try:
-                    budget.record(decision, data, settings, datetime.now(timezone.utc))
+                    budget.record(decision, data, attempt_settings, datetime.now(timezone.utc))
                 except Exception:
+                    from src.live.halt import trip_halt
+
                     trip_halt(by="file", reason="live model spending limit or usage accounting failure", broker=broker)
                     raise
 
@@ -984,18 +988,21 @@ def _build_live_runner(broker: str, *, environment: str = "live") -> Any:
                 )
 
             return await _retry_live_decision_attempt(attempt_once, broker=broker)
-        except asyncio.CancelledError:
+        except BaseException:
+            # A decision the model could not finish moves no money, so it must
+            # not halt: reconcile is the broker-state backstop, the runner
+            # audits the failed tick, and the next tick retries. Halting here
+            # parked the runner for 13 hours on 2026-11-11 after one
+            # no_progress tick. Budget accounting faults still halt (above).
             failed = True
-            raise
-        except Exception:
-            failed = True
-            trip_halt(by="file", reason="live model decision stopped; inspect runtime usage", broker=broker)
             raise
         finally:
             if decision is not None:
                 try:
-                    budget.finish(decision, settings, datetime.now(timezone.utc))
+                    budget.finish(decision, attempt_settings, datetime.now(timezone.utc))
                 except Exception:
+                    from src.live.halt import trip_halt
+
                     trip_halt(by="file", reason="live model budget exhausted or provider usage missing", broker=broker)
                     if not failed:
                         raise

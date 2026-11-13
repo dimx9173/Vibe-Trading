@@ -340,7 +340,9 @@ def test_agent_invocation_error_is_audited() -> None:
 
     assert result["outcome"] == TICK_ERROR
     assert result["reason"] == "agent crashed"
-    assert tracker.audits[-1]["kind"] == "breach"
+    # A model failure moves no money, so it is a failed tick, not a breach.
+    # Reconcile is the broker-state backstop; the runner keeps ticking.
+    assert tracker.audits[-1]["kind"] == "tick_completed"
     assert tracker.audits[-1]["outcome"] == "error"
 
 
